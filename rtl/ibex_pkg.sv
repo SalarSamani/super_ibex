@@ -301,7 +301,8 @@ package ibex_pkg;
   typedef enum logic [2:0] {
     PC_BOOT,
     PC_JUMP,
-    PC_EXC,
+    PC_EXC_M,
+    PC_EXC_S,
     PC_ERET,
     PC_DRET,
     PC_BP
@@ -315,20 +316,24 @@ package ibex_pkg;
   } instr_exp_e;
 
   // Exception PC mux selection
-  typedef enum logic [1:0] {
-    EXC_PC_EXC,
-    EXC_PC_IRQ,
+  typedef enum logic [2:0] {
+    EXC_PC_EXC_M,
+    EXC_PC_EXC_S,
+    EXC_PC_IRQ_M,
+    EXC_PC_IRQ_S,
     EXC_PC_DBD,
     EXC_PC_DBG_EXC // Exception while in debug mode
   } exc_pc_sel_e;
 
-  // Interrupt requests
+// Interrupt requests struct with S-mode support
   typedef struct packed {
-    logic        irq_software;
-    logic        irq_timer;
-    logic        irq_external;
-    logic [14:0] irq_fast; // 15 fast interrupts,
-                          // one interrupt is reserved for NMI (not visible through mip/mie)
+    logic        irq_external;   // Bit 11: Machine External
+    logic        irq_s_external; // Bit 9:  Supervisor External
+    logic        irq_timer;      // Bit 7:  Machine Timer
+    logic        irq_s_timer;    // Bit 5:  Supervisor Timer
+    logic        irq_software;   // Bit 3:  Machine Software
+    logic        irq_s_software; // Bit 1:  Supervisor Software
+    logic [14:0] irq_fast;       // Bits 16-30: Fast Interrupts (M-mode only)
   } irqs_t;
 
   typedef struct packed {
@@ -337,10 +342,16 @@ package ibex_pkg;
     logic [4:0] lower_cause;
   } exc_cause_t;
 
+  localparam exc_cause_t ExcCauseIrqSoftwareS =
+    '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd01};
   localparam exc_cause_t ExcCauseIrqSoftwareM =
     '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd03};
+  localparam exc_cause_t ExcCauseIrqTimerS =
+    '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd05};
   localparam exc_cause_t ExcCauseIrqTimerM =
     '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd07};
+  localparam exc_cause_t ExcCauseIrqExternalS =
+    '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd09};
   localparam exc_cause_t ExcCauseIrqExternalM =
     '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd11};
   localparam exc_cause_t ExcCauseIrqNm =
@@ -360,6 +371,8 @@ package ibex_pkg;
     '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd07};
   localparam exc_cause_t ExcCauseEcallUMode =
     '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd08};
+  localparam exc_cause_t ExcCauseEcallSMode =
+    '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd09};
   localparam exc_cause_t ExcCauseEcallMMode =
     '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd11};
 
@@ -451,9 +464,28 @@ package ibex_pkg;
     CSR_MHARTID    = 12'hF14,
     CSR_MCONFIGPTR = 12'hF15,
 
+    // Supervisor Trap Setup
+    CSR_SSTATUS    = 12'h100,
+    CSR_SIE        = 12'h104,
+    CSR_STVEC      = 12'h105,
+    CSR_SCOUNTEREN = 12'h106,
+
+    // Supervisor Trap Handling
+    CSR_SSCRATCH   = 12'h140,
+    CSR_SEPC       = 12'h141,
+    CSR_SCAUSE     = 12'h142,
+    CSR_STVAL      = 12'h143,
+    CSR_SIP        = 12'h144,
+
+    // Supervisor Protection and Translation
+    CSR_SATP       = 12'h180,
+
     // Machine trap setup
     CSR_MSTATUS   = 12'h300,
     CSR_MISA      = 12'h301,
+    // Machine Trap Delegation
+    CSR_MEDELEG   = 12'h302,
+    CSR_MIDELEG   = 12'h303,
     CSR_MIE       = 12'h304,
     CSR_MTVEC     = 12'h305,
     CSR_MCOUNTEREN= 12'h306,
@@ -622,6 +654,16 @@ package ibex_pkg;
   parameter int unsigned CSR_MSTATUS_MPRV_BIT     = 17;
   parameter int unsigned CSR_MSTATUS_TW_BIT       = 21;
 
+  // CSR status Supervisor Bits
+  parameter int unsigned CSR_MSTATUS_SIE_BIT      = 1;
+  parameter int unsigned CSR_MSTATUS_SPIE_BIT     = 5;
+  parameter int unsigned CSR_MSTATUS_SPP_BIT      = 8;
+  parameter int unsigned CSR_MSTATUS_SUM_BIT      = 18;
+  parameter int unsigned CSR_MSTATUS_MXR_BIT      = 19;
+  parameter int unsigned CSR_MSTATUS_TVM_BIT      = 20;
+  parameter int unsigned CSR_MSTATUS_TSR_BIT      = 22;
+  parameter int unsigned CSR_MSTATUS_SD_BIT       = 31;
+
   // CSR machine ISA
   parameter logic [1:0] CSR_MISA_MXL = 2'd1; // M-XLEN: XLEN in M-Mode for RV32
 
@@ -631,6 +673,11 @@ package ibex_pkg;
   parameter int unsigned CSR_MEIX_BIT      = 11;
   parameter int unsigned CSR_MFIX_BIT_LOW  = 16;
   parameter int unsigned CSR_MFIX_BIT_HIGH = 30;
+
+  // CSR interrupt pending/enable bits (S-mode)
+  parameter int unsigned CSR_SSIX_BIT = 1;
+  parameter int unsigned CSR_STIX_BIT = 5;
+  parameter int unsigned CSR_SEIX_BIT = 9;
 
   // CSR Machine Security Configuration bits
   parameter int unsigned CSR_MSECCFG_MML_BIT  = 0;

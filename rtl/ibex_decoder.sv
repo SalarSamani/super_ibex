@@ -27,12 +27,15 @@ module ibex_decoder #(
   output logic                 ebrk_insn_o,           // trap instr encountered
   output logic                 mret_insn_o,           // return from exception instr
                                                       // encountered
+  output logic                 sret_insn_o,           // return from supervisor exception instr
+                                                      // encountered
   output logic                 dret_insn_o,           // return from debug instr encountered
   output logic                 ecall_insn_o,          // syscall instr encountered
   output logic                 wfi_insn_o,            // wait for interrupt instr encountered
   output logic                 jump_set_o,            // jump taken set signal
   input  logic                 branch_taken_i,        // registered branch decision
   output logic                 icache_inval_o,
+  output logic                 sfence_vma_insn_o,      // sfence.vma instruction encountered
 
   // from IF-ID pipeline register
   input  logic                 instr_first_cycle_i,   // instruction read is in its first cycle
@@ -231,9 +234,11 @@ module ibex_decoder #(
     illegal_insn          = 1'b0;
     ebrk_insn_o           = 1'b0;
     mret_insn_o           = 1'b0;
+    sret_insn_o           = 1'b0;
     dret_insn_o           = 1'b0;
     ecall_insn_o          = 1'b0;
     wfi_insn_o            = 1'b0;
+    sfence_vma_insn_o     = 1'b0;
 
     opcode                = opcode_e'(instr[6:0]);
 
@@ -593,32 +598,50 @@ module ibex_decoder #(
       OPCODE_SYSTEM: begin
         if (instr[14:12] == 3'b000) begin
           // non CSR related SYSTEM instructions
-          unique case (instr[31:20])
-            12'h000:  // ECALL
-              // environment (system) call
-              ecall_insn_o = 1'b1;
 
-            12'h001:  // ebreak
-              // debugger trap
-              ebrk_insn_o = 1'b1;
+          // 1. First, check for SFENCE.VMA (it only uses the top 7 bits)
+          if (instr[31:25] == 7'b000_1001) begin
+            sfence_vma_insn_o = 1'b1;
+          end
 
-            12'h302:  // mret
-              mret_insn_o = 1'b1;
+          // 2. Then check for other SYSTEM instructions based on the full 12 bits
+          else begin
+            unique case (instr[31:20])
+              12'h000:  // ECALL
+                // environment (system) call
+                ecall_insn_o = 1'b1;
 
-            12'h7b2:  // dret
-              dret_insn_o = 1'b1;
+              12'h001:  // ebreak
+                // debugger trap
+                ebrk_insn_o = 1'b1;
 
-            12'h105:  // wfi
-              wfi_insn_o = 1'b1;
+              12'h302:  // mret
+                mret_insn_o = 1'b1;
 
-            default:
+              12'h102:  // sret
+                sret_insn_o = 1'b1;
+
+              12'h7b2:  // dret
+                dret_insn_o = 1'b1;
+
+              12'h105:  // wfi
+                wfi_insn_o = 1'b1;
+
+              default:
+                illegal_insn = 1'b1;
+            endcase
+          end
+
+          // rs1 and rd must be 0 for xRET. For SFENCE.VMA, rd must be 0.
+          if (sfence_vma_insn_o) begin
+            if (instr_rd != 5'b0) begin
               illegal_insn = 1'b1;
-          endcase
-
-          // rs1 and rd must be 0
-          if (instr_rs1 != 5'b0 || instr_rd != 5'b0) begin
+            end
+          end
+          else if (instr_rs1 != 5'b0 || instr_rd != 5'b0) begin
             illegal_insn = 1'b1;
           end
+          
         end else begin
           // instruction to read/modify CSR
           csr_access_o     = 1'b1;

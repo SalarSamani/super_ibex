@@ -49,6 +49,9 @@ module ibex_cs_registers import ibex_pkg::*; #(
   input  logic                 csr_mtvec_init_i,
   input  logic [31:0]          boot_addr_i,
 
+  //stvec
+  output logic [31:0]          csr_stvec_o,
+
   // Interface to registers (SRAM like)
   input  logic                 csr_access_i,
   input  ibex_pkg::csr_num_e   csr_addr_i,
@@ -66,6 +69,7 @@ module ibex_cs_registers import ibex_pkg::*; #(
   output logic                 irq_pending_o,          // interrupt request pending
   output ibex_pkg::irqs_t      irqs_o,                 // interrupt requests qualified with mie
   output logic                 csr_mstatus_mie_o,
+  output logic                 csr_mstatus_sie_o,
   output logic [31:0]          csr_mepc_o,
   output logic [31:0]          csr_mtval_o,
 
@@ -104,6 +108,7 @@ module ibex_cs_registers import ibex_pkg::*; #(
   input  logic                 csr_save_id_i,
   input  logic                 csr_save_wb_i,
   input  logic                 csr_restore_mret_i,
+  input  logic                 csr_restore_sret_i,
   input  logic                 csr_restore_dret_i,
   input  logic                 csr_save_cause_i,
   input  ibex_pkg::exc_cause_t csr_mcause_i,
@@ -112,6 +117,15 @@ module ibex_cs_registers import ibex_pkg::*; #(
                                                         // with wrong privilege level, or
                                                         // missing write permissions
   output logic                 double_fault_seen_o,
+
+  // CSR trap enable bits
+  output logic                 csr_mstatus_tsr_o,      // Trap on SRET instruction if mstatus.TSR=1
+  output logic                 csr_mstatus_tvm_o,      // Trap on satp access and sfence.vma if mstatus.TVM=1
+
+  //Delegation
+  input logic                  trap_to_s_mode_i,
+  output logic [31:0]          csr_medeleg_o,
+
   // Performance Counters
   input  logic                 instr_ret_i,                 // instr retired in ID/EX stage
   input  logic                 instr_ret_compressed_i,      // compressed instr retired
@@ -160,7 +174,7 @@ module ibex_cs_registers import ibex_pkg::*; #(
     | (32'(!RV32E)       <<  8)  // I - RV32I/64I/128I base ISA
     | (RV32MEnabled      << 12)  // M - Integer Multiply/Divide extension
     | (0                 << 13)  // N - User level interrupts supported
-    | (0                 << 18)  // S - Supervisor mode implemented
+    | (1                 << 18)  // S - Supervisor mode implemented
     | (1                 << 20)  // U - User mode implemented
     | (RV32BExtra        << 23)  // X - Non-standard extensions present
     | (32'(CSR_MISA_MXL) << 30); // M-XLEN
@@ -171,6 +185,15 @@ module ibex_cs_registers import ibex_pkg::*; #(
     priv_lvl_e mpp;
     logic      mprv;
     logic      tw;
+
+    // Supervisor Bits
+    logic      sie;
+    logic      spie;
+    logic      spp;
+    logic      mxr;
+    logic      sum;
+    logic      tvm;
+    logic      tsr;
   } status_t;
 
   typedef struct packed {
@@ -223,6 +246,10 @@ module ibex_cs_registers import ibex_pkg::*; #(
   logic        mscratch_en;
   logic [31:0] mepc_q, mepc_d;
   logic        mepc_en;
+  logic [31:0] medeleg_q, medeleg_d;
+  logic        medeleg_en;
+  logic [31:0] mideleg_q, mideleg_d;
+  logic        mideleg_en;
   exc_cause_t  mcause_q, mcause_d;
   logic        mcause_en;
   logic [31:0] mtval_q, mtval_d;
@@ -231,6 +258,18 @@ module ibex_cs_registers import ibex_pkg::*; #(
   logic        mtvec_err;
   logic        mtvec_en;
   irqs_t       mip;
+  logic [31:0] stvec_q, stvec_d;
+  logic        stvec_en;
+  logic [31:0] sscratch_q;
+  logic        sscratch_en;
+  exc_cause_t  scause_q, scause_d;
+  logic        scause_en;
+  logic [31:0] stval_q, stval_d;
+  logic        stval_en;
+  logic [31:0] sepc_q, sepc_d;
+  logic        sepc_en;
+  logic [31:0] satp_q, satp_d;
+  logic        satp_en;
   dcsr_t       dcsr_q, dcsr_d;
   logic        dcsr_en;
   logic [31:0] depc_q, depc_d;
@@ -304,6 +343,11 @@ module ibex_cs_registers import ibex_pkg::*; #(
   logic [2:0]  unused_csr_addr;
 
   assign unused_boot_addr = boot_addr_i[7:0];
+  
+  // TSR and TVM signals
+  assign csr_mstatus_tsr_o = mstatus_q.tsr;
+  assign csr_mstatus_tvm_o = mstatus_q.tvm;
+  logic illegal_tvm;
 
   /////////////
   // CSR reg //
@@ -317,14 +361,24 @@ module ibex_cs_registers import ibex_pkg::*; #(
   assign illegal_csr_dbg    = dbg_csr & ~debug_mode_i;
   assign illegal_csr_priv   = (csr_addr[9:8] > {priv_lvl_q});
   assign illegal_csr_write  = (csr_addr[11:10] == 2'b11) && csr_wr;
+  assign illegal_tvm        = (priv_lvl_q == PRIV_LVL_S) && mstatus_q.tvm && (csr_addr == CSR_SATP);
   assign illegal_csr_insn_o = csr_access_i & (illegal_csr | illegal_csr_write | illegal_csr_priv |
-                                              illegal_csr_dbg);
+                                              illegal_csr_dbg | illegal_tvm);
 
-  // mip CSR is purely combinational - must be able to re-enable the clock upon WFI
-  assign mip.irq_software = irq_software_i;
-  assign mip.irq_timer    = irq_timer_i;
-  assign mip.irq_external = irq_external_i;
-  assign mip.irq_fast     = irq_fast_i;
+  // mip CSR is purely combinational
+  
+  // Machine-level interrupts (M-mode)
+  // Route hardware wire to M-mode ONLY if it is NOT delegated
+  assign mip.irq_software   = irq_software_i  & ~mideleg_q[CSR_SSIX_BIT];
+  assign mip.irq_timer      = irq_timer_i     & ~mideleg_q[CSR_STIX_BIT];
+  assign mip.irq_external   = irq_external_i  & ~mideleg_q[CSR_SEIX_BIT];
+  assign mip.irq_fast       = irq_fast_i;
+
+  // Supervisor-level interrupts (S-mode)
+  // Route hardware wire to S-mode IF delegated, OR allow software trigger via mip
+  assign mip.irq_s_software = irq_software_i  & mideleg_q[CSR_SSIX_BIT];
+  assign mip.irq_s_timer    = irq_timer_i     & mideleg_q[CSR_STIX_BIT];
+  assign mip.irq_s_external = irq_external_i  & mideleg_q[CSR_SEIX_BIT];
 
   // read logic
   always_comb begin
@@ -352,6 +406,31 @@ module ibex_cs_registers import ibex_pkg::*; #(
         csr_rdata_int[CSR_MSTATUS_MPP_BIT_HIGH:CSR_MSTATUS_MPP_BIT_LOW] = mstatus_q.mpp;
         csr_rdata_int[CSR_MSTATUS_MPRV_BIT]                             = mstatus_q.mprv;
         csr_rdata_int[CSR_MSTATUS_TW_BIT]                               = mstatus_q.tw;
+
+        // Supervisor Bits
+        csr_rdata_int[CSR_MSTATUS_SIE_BIT]                              = mstatus_q.sie;
+        csr_rdata_int[CSR_MSTATUS_SPIE_BIT]                             = mstatus_q.spie;
+        csr_rdata_int[CSR_MSTATUS_SPP_BIT]                              = mstatus_q.spp;
+        csr_rdata_int[CSR_MSTATUS_SUM_BIT]                              = mstatus_q.sum;
+        csr_rdata_int[CSR_MSTATUS_MXR_BIT]                              = mstatus_q.mxr;
+        csr_rdata_int[CSR_MSTATUS_TVM_BIT]                              = mstatus_q.tvm;
+        csr_rdata_int[CSR_MSTATUS_TSR_BIT]                              = mstatus_q.tsr;
+        // SD (Bit 31) - Summarizes FS/XS. Hardwire to 0 for now.
+        csr_rdata_int[CSR_MSTATUS_SD_BIT]                               = 1'b0;
+      end
+
+      // sstatus: Supervisor-mode view of mstatus
+      CSR_SSTATUS: begin
+        csr_rdata_int                                                   = '0;
+
+        // Map internal mstatus fields to sstatus bit positions
+        csr_rdata_int[CSR_MSTATUS_SIE_BIT]                              = mstatus_q.sie;
+        csr_rdata_int[CSR_MSTATUS_SPIE_BIT]                             = mstatus_q.spie;
+        csr_rdata_int[CSR_MSTATUS_SPP_BIT]                              = mstatus_q.spp;
+        csr_rdata_int[CSR_MSTATUS_SUM_BIT]                              = mstatus_q.sum;
+        csr_rdata_int[CSR_MSTATUS_MXR_BIT]                              = mstatus_q.mxr;
+        // SD (Bit 31) - Summarizes FS/XS. Hardwire to 0 for now.
+        csr_rdata_int[CSR_MSTATUS_SD_BIT]                               = 1'b0;
       end
 
       // mstatush: All zeros for Ibex (fixed little endian and all other bits reserved)
@@ -364,13 +443,29 @@ module ibex_cs_registers import ibex_pkg::*; #(
       // misa
       CSR_MISA: csr_rdata_int = MISA_VALUE;
 
-      // interrupt enable
+      // MIE: Machine Interrupt Enable
+      // Machine mode can see everything in the register
       CSR_MIE: begin
         csr_rdata_int                                     = '0;
+        // Machine bits
         csr_rdata_int[CSR_MSIX_BIT]                       = mie_q.irq_software;
         csr_rdata_int[CSR_MTIX_BIT]                       = mie_q.irq_timer;
         csr_rdata_int[CSR_MEIX_BIT]                       = mie_q.irq_external;
         csr_rdata_int[CSR_MFIX_BIT_HIGH:CSR_MFIX_BIT_LOW] = mie_q.irq_fast;
+        
+        // Supervisor bits (Visible to M-mode)
+        csr_rdata_int[CSR_SSIX_BIT]                       = mie_q.irq_s_software;
+        csr_rdata_int[CSR_STIX_BIT]                       = mie_q.irq_s_timer;
+        csr_rdata_int[CSR_SEIX_BIT]                       = mie_q.irq_s_external;
+      end
+
+      // SIE: Supervisor Interrupt Enable
+      // Only show bits that are delegated in mideleg
+      CSR_SIE: begin
+        csr_rdata_int = '0;
+        csr_rdata_int[CSR_SSIX_BIT] = mie_q.irq_s_software & mideleg_q[CSR_SSIX_BIT];
+        csr_rdata_int[CSR_STIX_BIT] = mie_q.irq_s_timer    & mideleg_q[CSR_STIX_BIT];
+        csr_rdata_int[CSR_SEIX_BIT] = mie_q.irq_s_external & mideleg_q[CSR_SEIX_BIT];
       end
 
       // mcounteren: machine counter enable
@@ -380,27 +475,80 @@ module ibex_cs_registers import ibex_pkg::*; #(
 
       CSR_MSCRATCH: csr_rdata_int = mscratch_q;
 
+      // sscratch: supervisor scratch register
+      CSR_SSCRATCH: csr_rdata_int = sscratch_q;
+
       // mtvec: trap-vector base address
       CSR_MTVEC: csr_rdata_int = mtvec_q;
 
+      // stvec: supervisor trap-vector base address
+      CSR_STVEC: csr_rdata_int = stvec_q;
+
       // mepc: exception program counter
       CSR_MEPC: csr_rdata_int = mepc_q;
+
+      // sepc: supervisor exception program counter
+      CSR_SEPC: csr_rdata_int = sepc_q;
 
       // mcause: exception cause
       CSR_MCAUSE: csr_rdata_int = {mcause_q.irq_ext | mcause_q.irq_int,
                                    mcause_q.irq_int ? {26{1'b1}} : 26'b0,
                                    mcause_q.lower_cause[4:0]};
 
+      // scause: supervisor exception cause
+      CSR_SCAUSE: csr_rdata_int = {scause_q.irq_ext | scause_q.irq_int,
+                                   scause_q.irq_int ? {26{1'b1}} : 26'b0,
+                                   scause_q.lower_cause[4:0]};
+
       // mtval: trap value
       CSR_MTVAL: csr_rdata_int = mtval_q;
 
-      // mip: interrupt pending
+      // stval: supervisor trap value
+      CSR_STVAL: csr_rdata_int = stval_q;
+
+      // MIP: Machine Interrupt Pending
+      // Machine mode sees both M and S interrupt status
       CSR_MIP: begin
         csr_rdata_int                                     = '0;
+        // Machine-level bits
         csr_rdata_int[CSR_MSIX_BIT]                       = mip.irq_software;
         csr_rdata_int[CSR_MTIX_BIT]                       = mip.irq_timer;
         csr_rdata_int[CSR_MEIX_BIT]                       = mip.irq_external;
         csr_rdata_int[CSR_MFIX_BIT_HIGH:CSR_MFIX_BIT_LOW] = mip.irq_fast;
+        
+        // Supervisor-level bits
+        csr_rdata_int[CSR_SSIX_BIT]                       = mip.irq_s_software;
+        csr_rdata_int[CSR_STIX_BIT]                       = mip.irq_s_timer;
+        csr_rdata_int[CSR_SEIX_BIT]                       = mip.irq_s_external;
+      end
+
+      // SIP: Supervisor Interrupt Pending
+      // Only show S-mode bits that are delegated in mideleg
+      CSR_SIP: begin
+        csr_rdata_int = '0;      
+        csr_rdata_int[CSR_SSIX_BIT] = mip.irq_s_software & mideleg_q[CSR_SSIX_BIT];
+        csr_rdata_int[CSR_STIX_BIT] = mip.irq_s_timer    & mideleg_q[CSR_STIX_BIT];
+        csr_rdata_int[CSR_SEIX_BIT] = mip.irq_s_external & mideleg_q[CSR_SEIX_BIT];
+      end
+
+      // Delegation registers
+      CSR_MEDELEG: begin
+        csr_rdata_int = '0;
+        // Read mideleg
+        csr_rdata_int = medeleg_q;
+      end
+
+      CSR_MIDELEG: begin
+        csr_rdata_int = '0;
+        // Read mideleg
+        csr_rdata_int = mideleg_q;
+      end
+
+      CSR_SATP: begin
+        csr_rdata_int = '0;
+
+        // Read SATP
+        csr_rdata_int = satp_q;
       end
 
       CSR_MSECCFG: begin
@@ -570,20 +718,40 @@ module ibex_cs_registers import ibex_pkg::*; #(
     mstatus_en   = 1'b0;
     mstatus_d    = mstatus_q;
     mie_en       = 1'b0;
+    mie_d        = mie_q;
     mscratch_en  = 1'b0;
+    sscratch_en  = 1'b0;
     mepc_en      = 1'b0;
     mepc_d       = {csr_wdata_int[31:1], 1'b0};
+    sepc_en      = 1'b0;
+    sepc_d       = {csr_wdata_int[31:1], 1'b0};
+    medeleg_en   = 1'b0;
+    // Exception Code 11 (ECALL from M-mode) is strictly non-delegatable.
+    medeleg_d    = csr_wdata_int & ~(1 << 11);
+    mideleg_en   = 1'b0;
+    // Only Supervisor-level interrupts (SSI=1, STI=5, SEI=9) are delegatable.
+    mideleg_d    = csr_wdata_int & ((1 << 1) | (1 << 5) | (1 << 9));
     mcause_en    = 1'b0;
     mcause_d     = '{irq_ext :    csr_wdata_int[31:30] == 2'b10,
                      irq_int :    csr_wdata_int[31:30] == 2'b11,
                      lower_cause: csr_wdata_int[4:0]};
+    scause_en    = 1'b0;
+    scause_d     = '{irq_ext :    csr_wdata_int[31:30] == 2'b10,
+                     irq_int :    csr_wdata_int[31:30] == 2'b11,
+                     lower_cause: csr_wdata_int[4:0]}; 
     mtval_en     = 1'b0;
     mtval_d      = csr_wdata_int;
+    stval_en     = 1'b0;
+    stval_d      = csr_wdata_int;
     mtvec_en     = csr_mtvec_init_i;
     // mtvec.MODE set to vectored
     // mtvec.BASE must be 256-byte aligned
     mtvec_d      = csr_mtvec_init_i ? {boot_addr_i[31:8], 6'b0, 2'b01} :
                                       {csr_wdata_int[31:8], 6'b0, 2'b01};
+    stvec_en     = 1'b0;
+    stvec_d      = {csr_wdata_int[31:2], 1'b0, csr_wdata_int[0]};
+    satp_en      = 1'b0;
+    satp_d       = csr_wdata_int;
     dcsr_en      = 1'b0;
     dcsr_d       = dcsr_q;
     depc_d       = {csr_wdata_int[31:1], 1'b0};
@@ -616,30 +784,120 @@ module ibex_cs_registers import ibex_pkg::*; #(
               mpie: csr_wdata_int[CSR_MSTATUS_MPIE_BIT],
               mpp:  priv_lvl_e'(csr_wdata_int[CSR_MSTATUS_MPP_BIT_HIGH:CSR_MSTATUS_MPP_BIT_LOW]),
               mprv: csr_wdata_int[CSR_MSTATUS_MPRV_BIT],
-              tw:   csr_wdata_int[CSR_MSTATUS_TW_BIT]
+              tw:   csr_wdata_int[CSR_MSTATUS_TW_BIT],
+              tsr:  csr_wdata_int[CSR_MSTATUS_TSR_BIT],
+
+              // Supervisor fields
+              sie:  csr_wdata_int[CSR_MSTATUS_SIE_BIT],
+              spie: csr_wdata_int[CSR_MSTATUS_SPIE_BIT],
+              spp:  csr_wdata_int[CSR_MSTATUS_SPP_BIT],
+              sum:  csr_wdata_int[CSR_MSTATUS_SUM_BIT],
+              mxr:  csr_wdata_int[CSR_MSTATUS_MXR_BIT],
+              tvm:  csr_wdata_int[CSR_MSTATUS_TVM_BIT]
           };
           // Convert illegal values to U-mode
-          if ((mstatus_d.mpp != PRIV_LVL_M) && (mstatus_d.mpp != PRIV_LVL_U)) begin
+          // We now allow Machine (11), Supervisor (01), and User (00).
+          // If the software writes 10 (Hypervisor is not implemented), we force it to User mode.
+          if ((mstatus_d.mpp != PRIV_LVL_M) &&
+              (mstatus_d.mpp != PRIV_LVL_S) && 
+              (mstatus_d.mpp != PRIV_LVL_U)) begin
             mstatus_d.mpp = PRIV_LVL_U;
           end
         end
 
-        // interrupt enable
-        CSR_MIE: mie_en = 1'b1;
+        CSR_SSTATUS: begin
+          mstatus_en = 1'b1;
+          mstatus_d    = '{
+              // Keep existing Machine fields (do not change)
+              mie:  mstatus_q.mie,
+              mpie: mstatus_q.mpie,
+              mpp:  mstatus_q.mpp,
+              mprv: mstatus_q.mprv,
+              tw:   mstatus_q.tw,
+              tsr:  mstatus_q.tsr,
+              tvm:  mstatus_q.tvm,
+
+              // Update ONLY Supervisor fields from write data
+              sie:  csr_wdata_int[CSR_MSTATUS_SIE_BIT],
+              spie: csr_wdata_int[CSR_MSTATUS_SPIE_BIT],
+              spp:  csr_wdata_int[CSR_MSTATUS_SPP_BIT],
+              sum:  csr_wdata_int[CSR_MSTATUS_SUM_BIT],
+              mxr:  csr_wdata_int[CSR_MSTATUS_MXR_BIT]
+          };
+
+          // Note: No MPP check is needed here because sstatus cannot 
+          // change the mpp field (we used mstatus_q.mpp above).
+        end
+
+        // MIE: Machine Interrupt Enable
+        CSR_MIE: begin
+          mie_en = 1'b1;
+          mie_d  = '{
+            irq_software:   csr_wdata_int[CSR_MSIX_BIT],
+            irq_timer:      csr_wdata_int[CSR_MTIX_BIT],
+            irq_external:   csr_wdata_int[CSR_MEIX_BIT],
+            irq_fast:       csr_wdata_int[CSR_MFIX_BIT_HIGH:CSR_MFIX_BIT_LOW],
+
+            // Supervisor bits
+            irq_s_software: csr_wdata_int[CSR_SSIX_BIT],
+            irq_s_timer:    csr_wdata_int[CSR_STIX_BIT],
+            irq_s_external: csr_wdata_int[CSR_SEIX_BIT]
+          };
+        end
+
+        // SIE: supervisor interrupt enable - only allow enabling delegated interrupts
+        CSR_SIE: begin
+          mie_en = 1'b1;
+          mie_d  = '{
+            // Keep existing Machine bits (M-mode only)
+            irq_software:   mie_q.irq_software,
+            irq_timer:      mie_q.irq_timer,
+            irq_external:   mie_q.irq_external,
+            irq_fast:       mie_q.irq_fast,
+
+            // Update Supervisor bits only if they are delegated in mideleg
+            irq_s_software: mideleg_q[CSR_SSIX_BIT] ? csr_wdata_int[CSR_SSIX_BIT] : mie_q.irq_s_software,
+            irq_s_timer:    mideleg_q[CSR_STIX_BIT] ? csr_wdata_int[CSR_STIX_BIT] : mie_q.irq_s_timer,
+            irq_s_external: mideleg_q[CSR_SEIX_BIT] ? csr_wdata_int[CSR_SEIX_BIT] : mie_q.irq_s_external
+          };
+        end
 
         CSR_MSCRATCH: mscratch_en = 1'b1;
+
+        // sscratch: supervisor scratch register
+        CSR_SSCRATCH: sscratch_en = 1'b1;
 
         // mepc: exception program counter
         CSR_MEPC: mepc_en = 1'b1;
 
+        // sepc: supervisor exception program counter
+        CSR_SEPC: sepc_en = 1'b1;
+
         // mcause
         CSR_MCAUSE: mcause_en = 1'b1;
+
+        // scause
+        CSR_SCAUSE: scause_en = 1'b1;
 
         // mtval: trap value
         CSR_MTVAL: mtval_en = 1'b1;
 
         // mtvec
         CSR_MTVEC: mtvec_en = 1'b1;
+
+        // stvec
+        CSR_STVEC: stvec_en = 1'b1;
+
+        CSR_MEDELEG: begin
+          medeleg_en = 1'b1;
+        end
+
+        CSR_MIDELEG: begin
+          mideleg_en = 1'b1;
+        end
+
+        // satp: supervisor address translation and protection
+        CSR_SATP: satp_en = 1'b1;
 
         CSR_DCSR: begin
           dcsr_d = csr_wdata_int;
@@ -712,7 +970,7 @@ module ibex_cs_registers import ibex_pkg::*; #(
       endcase
     end
 
-    // exception controller gets priority over other writes
+// Exception controller gets priority over standard software writes
     unique case (1'b1)
 
       csr_save_cause_i: begin
@@ -729,9 +987,6 @@ module ibex_cs_registers import ibex_pkg::*; #(
           default:;
         endcase
 
-        // Any exception, including debug mode, causes a switch to M-mode
-        priv_lvl_d = PRIV_LVL_M;
-
         if (debug_csr_save_i) begin
           // all interrupts are masked
           // do not update cause, epc, tval, epc and status
@@ -740,23 +995,59 @@ module ibex_cs_registers import ibex_pkg::*; #(
           dcsr_en      = 1'b1;
           depc_d       = exception_pc;
           depc_en      = 1'b1;
-        end else if (!debug_mode_i) begin
-          // Exceptions do not update CSRs in debug mode, so ony write these CSRs if we're not in
-          // debug mode.
-          mtval_en       = 1'b1;
-          mtval_d        = csr_mtval_i;
-          mstatus_en     = 1'b1;
-          mstatus_d.mie  = 1'b0; // disable interrupts
-          // save current status
-          mstatus_d.mpie = mstatus_q.mie;
-          mstatus_d.mpp  = priv_lvl_q;
-          mepc_en        = 1'b1;
-          mepc_d         = exception_pc;
-          mcause_en      = 1'b1;
-          mcause_d       = csr_mcause_i;
-          // save previous status for recoverable NMI
-          mstack_en      = 1'b1;
 
+          // Debug Mode always gets Machine Privilege
+          priv_lvl_d   = PRIV_LVL_M;
+        end else if (!debug_mode_i) begin
+          
+          // ==============================================================
+          // THE HARDWARE DELEGATION ROUTER
+          // ==============================================================
+          if (trap_to_s_mode_i) begin
+            // 1. Route trap state EXCLUSIVELY to Supervisor-mode CSRs
+            stval_en  = 1'b1;
+            stval_d   = csr_mtval_i; // Hardware fault address routed to stval
+            
+            sepc_en   = 1'b1;
+            sepc_d    = exception_pc;
+            
+            scause_en = 1'b1;
+            scause_d  = csr_mcause_i; // Hardware fault code safely routed to scause
+            
+            // 2. Update Status Register Shadowing (sstatus via mstatus struct)
+            // The M-mode bits (MPP, MPIE) are strictly NOT written.
+            mstatus_en     = 1'b1;
+            mstatus_d.spie = mstatus_q.sie; // Save previous S-mode interrupt enable
+            mstatus_d.sie  = 1'b0;          // Disable interrupts upon trap entry
+            mstatus_d.spp  = (priv_lvl_q == PRIV_LVL_U)? 1'b0 : 1'b1; 
+            
+            // 3. Force execution privilege to S-mode
+            priv_lvl_d = PRIV_LVL_S;  
+            
+          end else begin
+            // 1. Route trap state EXCLUSIVELY to Machine-mode CSRs
+            mtval_en  = 1'b1;
+            mtval_d   = csr_mtval_i;
+
+            mepc_en   = 1'b1;
+            mepc_d    = exception_pc;
+
+            mcause_en = 1'b1;
+            mcause_d  = csr_mcause_i; // Hardware fault code safely routed to mcause
+
+            // 2. Update Status Register 
+            mstatus_en     = 1'b1;
+            mstatus_d.mpie = mstatus_q.mie;
+            mstatus_d.mie  = 1'b0;
+            mstatus_d.mpp  = priv_lvl_q;
+
+            // 3. Force execution privilege to M-mode
+            priv_lvl_d = PRIV_LVL_M;  
+            
+            mstack_en = 1'b1; // save previous status for recoverable NMI
+          end
+          // ==============================================================
+          
           if (!(mcause_d.irq_ext || mcause_d.irq_int)) begin
             // SEC_CM: EXCEPTION.CTRL_FLOW.LOCAL_ESC
             // SEC_CM: EXCEPTION.CTRL_FLOW.GLOBAL_ESC
@@ -804,6 +1095,26 @@ module ibex_cs_registers import ibex_pkg::*; #(
         end
       end // csr_restore_mret_i
 
+      csr_restore_sret_i: begin // SRET
+        // 1. Restore Privilege Level
+        // SRET sets the privilege level to the value saved in mstatus.SPP
+        priv_lvl_d = mstatus_q.spp ? PRIV_LVL_S : PRIV_LVL_U;
+
+        // 2. Update Status Bits
+        mstatus_en     = 1'b1;
+        mstatus_d.sie  = mstatus_q.spie; // SIE <- SPIE (re-enable interrupts)
+        mstatus_d.mprv = 1'b0;           // MPRV is always cleared on SRET
+
+        // Update tracking for sync exceptions, similar to MRET style
+        cpuctrlsts_part_we              = 1'b1;
+        cpuctrlsts_part_d.sync_exc_seen = 1'b0;
+
+        // Set SPIE and SPP to their default return values
+        // SPIE <- 1, SPP <- U (0)
+        mstatus_d.spie = 1'b1;
+        mstatus_d.spp  = 1'b0;
+      end // csr_restore_sret_i
+
       default:;
     endcase
   end
@@ -841,13 +1152,16 @@ module ibex_cs_registers import ibex_pkg::*; #(
   assign csr_rdata_o = csr_rdata_int;
 
   // directly output some registers
-  assign csr_mepc_o  = mepc_q;
-  assign csr_depc_o  = depc_q;
-  assign csr_mtvec_o = mtvec_q;
-  assign csr_mtval_o = mtval_q;
+  assign csr_mepc_o          = csr_restore_sret_i? sepc_q : mepc_q;
+  assign csr_depc_o          = depc_q;
+  assign csr_mtvec_o         = mtvec_q;
+  assign csr_mtval_o         = mtval_q;
 
   assign csr_mstatus_mie_o   = mstatus_q.mie;
+  assign csr_mstatus_sie_o   = mstatus_q.sie;
   assign csr_mstatus_tw_o    = mstatus_q.tw;
+  assign csr_medeleg_o       = medeleg_q;
+  assign csr_stvec_o         = stvec_q;
   assign debug_single_step_o = dcsr_q.step;
   assign debug_ebreakm_o     = dcsr_q.ebreakm;
   assign debug_ebreaku_o     = dcsr_q.ebreaku;
@@ -863,10 +1177,20 @@ module ibex_cs_registers import ibex_pkg::*; #(
 
   // MSTATUS
   localparam status_t MSTATUS_RST_VAL = '{mie:  1'b0,
-                                          mpie: 1'b1,
-                                          mpp:  PRIV_LVL_U,
+                                          mpie: 1'b0,
+                                          mpp:  PRIV_LVL_M,
                                           mprv: 1'b0,
-                                          tw:   1'b0};
+                                          tw:   1'b0,
+
+                                          // Supervisor Bits
+                                          sie:  1'b0,
+                                          spie: 1'b0,
+                                          spp:  1'b0,
+                                          mxr:  1'b0,
+                                          sum:  1'b0,
+                                          tvm:  1'b0,
+                                          tsr:  1'b0
+                                          };
   ibex_csr #(
     .Width     ($bits(status_t)),
     .ShadowCopy(ShadowCSR),
@@ -894,11 +1218,21 @@ module ibex_cs_registers import ibex_pkg::*; #(
     .rd_error_o()
   );
 
+  // SEPC
+  ibex_csr #(
+    .Width     (32),
+    .ShadowCopy(1'b0),
+    .ResetValue('0)
+  ) u_sepc_csr (
+    .clk_i     (clk_i),
+    .rst_ni    (rst_ni),
+    .wr_data_i (sepc_d),
+    .wr_en_i   (sepc_en),
+    .rd_data_o (sepc_q),
+    .rd_error_o()
+  );
+
   // MIE
-  assign mie_d.irq_software = csr_wdata_int[CSR_MSIX_BIT];
-  assign mie_d.irq_timer    = csr_wdata_int[CSR_MTIX_BIT];
-  assign mie_d.irq_external = csr_wdata_int[CSR_MEIX_BIT];
-  assign mie_d.irq_fast     = csr_wdata_int[CSR_MFIX_BIT_HIGH:CSR_MFIX_BIT_LOW];
   ibex_csr #(
     .Width     ($bits(irqs_t)),
     .ShadowCopy(1'b0),
@@ -926,6 +1260,20 @@ module ibex_cs_registers import ibex_pkg::*; #(
     .rd_error_o()
   );
 
+  // SSCRATCH
+  ibex_csr #(
+    .Width     (32),
+    .ShadowCopy(1'b0),
+    .ResetValue('0)
+  ) u_sscratch_csr (
+    .clk_i     (clk_i),
+    .rst_ni    (rst_ni),
+    .wr_data_i (csr_wdata_int),
+    .wr_en_i   (sscratch_en),
+    .rd_data_o (sscratch_q),
+    .rd_error_o()
+  );
+
   // MCAUSE
   ibex_csr #(
     .Width     ($bits(exc_cause_t)),
@@ -937,6 +1285,20 @@ module ibex_cs_registers import ibex_pkg::*; #(
     .wr_data_i ({mcause_d}),
     .wr_en_i   (mcause_en),
     .rd_data_o (mcause_q),
+    .rd_error_o()
+  );
+
+  // SCAUSE
+  ibex_csr #(
+    .Width     ($bits(exc_cause_t)),
+    .ShadowCopy(1'b0),
+    .ResetValue('0)
+  ) u_scause_csr (
+    .clk_i     (clk_i),
+    .rst_ni    (rst_ni),
+    .wr_data_i ({scause_d}),
+    .wr_en_i   (scause_en),
+    .rd_data_o (scause_q),
     .rd_error_o()
   );
 
@@ -954,6 +1316,20 @@ module ibex_cs_registers import ibex_pkg::*; #(
     .rd_error_o()
   );
 
+  // STVAL
+  ibex_csr #(
+    .Width     (32),
+    .ShadowCopy(1'b0),
+    .ResetValue('0)
+  ) u_stval_csr (
+    .clk_i     (clk_i),
+    .rst_ni    (rst_ni),
+    .wr_data_i (stval_d),
+    .wr_en_i   (stval_en),
+    .rd_data_o (stval_q),
+    .rd_error_o()
+  );
+
   // MTVEC
   ibex_csr #(
     .Width     (32),
@@ -966,6 +1342,62 @@ module ibex_cs_registers import ibex_pkg::*; #(
     .wr_en_i   (mtvec_en),
     .rd_data_o (mtvec_q),
     .rd_error_o(mtvec_err)
+  );
+
+  // STVEC
+  ibex_csr #(
+    .Width     (32),
+    .ShadowCopy(1'b0),
+    .ResetValue('0)
+  ) u_stvec_csr (
+    .clk_i     (clk_i),
+    .rst_ni    (rst_ni),
+    .wr_data_i (stvec_d),
+    .wr_en_i   (stvec_en),
+    .rd_data_o (stvec_q),
+    .rd_error_o()
+  );
+
+  // MEDELEG
+  ibex_csr #(
+    .Width      (32),
+    .ShadowCopy (1'b0),
+    .ResetValue ('0)
+  ) u_medeleg_csr (
+    .clk_i      (clk_i),
+    .rst_ni     (rst_ni),
+    .wr_data_i  (medeleg_d),
+    .wr_en_i    (medeleg_en),
+    .rd_data_o  (medeleg_q),
+    .rd_error_o ()
+  );
+
+  // MIDELEG
+  ibex_csr #(
+    .Width      (32),
+    .ShadowCopy (1'b0),
+    .ResetValue ('0)
+  ) u_mideleg_csr (
+    .clk_i      (clk_i),
+    .rst_ni     (rst_ni),
+    .wr_data_i  (mideleg_d),
+    .wr_en_i    (mideleg_en),
+    .rd_data_o  (mideleg_q),
+    .rd_error_o ()
+  );
+
+  // SATP
+  ibex_csr #(
+    .Width     (32),
+    .ShadowCopy(1'b0),
+    .ResetValue('0)
+  ) u_satp_csr (
+    .clk_i     (clk_i),
+    .rst_ni    (rst_ni),
+    .wr_data_i (satp_d),
+    .wr_en_i   (satp_en),
+    .rd_data_o (satp_q),
+    .rd_error_o()
   );
 
   // DCSR

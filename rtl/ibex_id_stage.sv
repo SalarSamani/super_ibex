@@ -101,13 +101,18 @@ module ibex_id_stage #(
   output logic                      csr_save_id_o,
   output logic                      csr_save_wb_o,
   output logic                      csr_restore_mret_id_o,
+  output logic                      csr_restore_sret_id_o,
   output logic                      csr_restore_dret_id_o,
   output logic                      csr_save_cause_o,
   output logic [31:0]               csr_mtval_o,
   input  ibex_pkg::priv_lvl_e       priv_mode_i,
   input  logic                      csr_mstatus_tw_i,
+  input  logic                      csr_mstatus_tvm_i,
+  input  logic                      csr_mstatus_tsr_i,
   input  logic                      illegal_csr_insn_i,
   input  logic                      data_ind_timing_i,
+  output logic                      trap_to_s_mode_o,
+  input  logic [31:0]               csr_medeleg_i,
 
   // Interface to load store unit
   output logic                      lsu_req_o,
@@ -126,6 +131,7 @@ module ibex_id_stage #(
 
   // Interrupt signals
   input  logic                      csr_mstatus_mie_i,
+  input  logic                      csr_mstatus_sie_i,
   input  logic                      irq_pending_i,
   input  ibex_pkg::irqs_t           irqs_i,
   input  logic                      irq_nm_i,
@@ -200,9 +206,11 @@ module ibex_id_stage #(
   logic        illegal_umode_insn;
   logic        ebrk_insn;
   logic        mret_insn_dec;
+  logic        sret_insn_dec;
   logic        dret_insn_dec;
   logic        ecall_insn_dec;
   logic        wfi_insn_dec;
+  logic        sfence_vma_insn_dec;
 
   logic        wb_exception;
   logic        id_exception;
@@ -443,15 +451,17 @@ module ibex_id_stage #(
     .rst_ni(rst_ni),
 
     // controller
-    .illegal_insn_o(illegal_insn_dec),
-    .ebrk_insn_o   (ebrk_insn),
-    .mret_insn_o   (mret_insn_dec),
-    .dret_insn_o   (dret_insn_dec),
-    .ecall_insn_o  (ecall_insn_dec),
-    .wfi_insn_o    (wfi_insn_dec),
-    .jump_set_o    (jump_set_dec),
-    .branch_taken_i(branch_taken),
-    .icache_inval_o(icache_inval_o),
+    .illegal_insn_o     (illegal_insn_dec),
+    .ebrk_insn_o        (ebrk_insn),
+    .mret_insn_o        (mret_insn_dec),
+    .sret_insn_o        (sret_insn_dec),
+    .dret_insn_o        (dret_insn_dec),
+    .ecall_insn_o       (ecall_insn_dec),
+    .wfi_insn_o         (wfi_insn_dec),
+    .jump_set_o         (jump_set_dec),
+    .branch_taken_i     (branch_taken),
+    .icache_inval_o     (icache_inval_o),
+    .sfence_vma_insn_o  (sfence_vma_insn_dec),
 
     // from IF-ID pipeline register
     .instr_first_cycle_i(instr_first_cycle),
@@ -554,13 +564,15 @@ module ibex_id_stage #(
     .ctrl_busy_o(ctrl_busy_o),
 
     // decoder related signals
-    .illegal_insn_i  (illegal_insn_o),
-    .ecall_insn_i    (ecall_insn_dec),
-    .mret_insn_i     (mret_insn_dec),
-    .dret_insn_i     (dret_insn_dec),
-    .wfi_insn_i      (wfi_insn_dec),
-    .ebrk_insn_i     (ebrk_insn),
-    .csr_pipe_flush_i(csr_pipe_flush),
+    .illegal_insn_i       (illegal_insn_o),
+    .ecall_insn_i         (ecall_insn_dec),
+    .mret_insn_i          (mret_insn_dec),
+    .sret_insn_i          (sret_insn_dec),
+    .dret_insn_i          (dret_insn_dec),
+    .wfi_insn_i           (wfi_insn_dec),
+    .ebrk_insn_i          (ebrk_insn),
+    .csr_pipe_flush_i     (csr_pipe_flush),
+    .sfence_vma_insn_i    (sfence_vma_insn_dec),
 
     // from IF-ID pipeline
     .instr_valid_i          (instr_valid_i),
@@ -601,6 +613,7 @@ module ibex_id_stage #(
 
     // interrupt signals
     .csr_mstatus_mie_i(csr_mstatus_mie_i),
+    .csr_mstatus_sie_i(csr_mstatus_sie_i),
     .irq_pending_i    (irq_pending_i),
     .irqs_i           (irqs_i),
     .irq_nm_ext_i     (irq_nm_i),
@@ -611,10 +624,15 @@ module ibex_id_stage #(
     .csr_save_id_o        (csr_save_id_o),
     .csr_save_wb_o        (csr_save_wb_o),
     .csr_restore_mret_id_o(csr_restore_mret_id_o),
+    .csr_restore_sret_id_o(csr_restore_sret_id_o),
     .csr_restore_dret_id_o(csr_restore_dret_id_o),
     .csr_save_cause_o     (csr_save_cause_o),
     .csr_mtval_o          (csr_mtval_o),
     .priv_mode_i          (priv_mode_i),
+    .csr_mstatus_tsr_i    (csr_mstatus_tsr_i),
+    .csr_mstatus_tvm_i    (csr_mstatus_tvm_i),
+    .csr_medeleg_i        (csr_medeleg_i),
+    .trap_to_s_mode_o     (trap_to_s_mode_o),
 
     // Debug Signal
     .debug_mode_o         (debug_mode_o),

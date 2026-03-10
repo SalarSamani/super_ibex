@@ -334,6 +334,7 @@ module ibex_core import ibex_pkg::*; #(
   logic        nmi_mode;
   irqs_t       irqs;
   logic        csr_mstatus_mie;
+  logic        csr_mstatus_sie;
   logic [31:0] csr_mepc, csr_depc;
 
   // PMP signals
@@ -347,14 +348,20 @@ module ibex_core import ibex_pkg::*; #(
   logic        csr_save_id;
   logic        csr_save_wb;
   logic        csr_restore_mret_id;
+  logic        csr_restore_sret_id;
   logic        csr_restore_dret_id;
   logic        csr_save_cause;
   logic        csr_mtvec_init;
   logic [31:0] csr_mtvec;
+  logic [31:0] csr_stvec;
   logic [31:0] csr_mtval;
   logic        csr_mstatus_tw;
+  logic        csr_mstatus_tvm;
+  logic        csr_mstatus_tsr;
   priv_lvl_e   priv_mode_id;
   priv_lvl_e   priv_mode_lsu;
+  logic        trap_to_s_mode;
+  logic [31:0] csr_medeleg;
 
   // debug mode and dcsr configuration
   logic        debug_mode;
@@ -513,6 +520,7 @@ module ibex_core import ibex_pkg::*; #(
     .csr_depc_i      (csr_depc),  // debug return address
     .csr_mtvec_i     (csr_mtvec),  // trap-vector base address
     .csr_mtvec_init_o(csr_mtvec_init),
+    .csr_stvec_i     (csr_stvec),  // trap-vector base address for S-mode
 
     // pipeline stalls
     .id_in_ready_i(id_in_ready),
@@ -633,13 +641,18 @@ module ibex_core import ibex_pkg::*; #(
     .csr_save_id_o        (csr_save_id),  // control signal to save PC
     .csr_save_wb_o        (csr_save_wb),  // control signal to save PC
     .csr_restore_mret_id_o(csr_restore_mret_id),  // restore mstatus upon MRET
+    .csr_restore_sret_id_o(csr_restore_sret_id),  // restore mstatus upon SRET
     .csr_restore_dret_id_o(csr_restore_dret_id),  // restore mstatus upon MRET
     .csr_save_cause_o     (csr_save_cause),
     .csr_mtval_o          (csr_mtval),
     .priv_mode_i          (priv_mode_id),
+    .csr_mstatus_tvm_i    (csr_mstatus_tvm),
+    .csr_mstatus_tsr_i    (csr_mstatus_tsr),
     .csr_mstatus_tw_i     (csr_mstatus_tw),
     .illegal_csr_insn_i   (illegal_csr_insn_id),
     .data_ind_timing_i    (data_ind_timing),
+    .trap_to_s_mode_o     (trap_to_s_mode),
+    .csr_medeleg_i        (csr_medeleg),
 
     // LSU
     .lsu_req_o     (lsu_req),  // to load store unit
@@ -662,6 +675,7 @@ module ibex_core import ibex_pkg::*; #(
 
     // Interrupt Signals
     .csr_mstatus_mie_i(csr_mstatus_mie),
+    .csr_mstatus_sie_i(csr_mstatus_sie),
     .irq_pending_i    (irq_pending_o),
     .irqs_i           (irqs),
     .irq_nm_i         (irq_nm_i),
@@ -1084,6 +1098,9 @@ module ibex_core import ibex_pkg::*; #(
     .csr_mtvec_init_i(csr_mtvec_init),
     .boot_addr_i     (boot_addr_i),
 
+    // stvec
+    .csr_stvec_o     (csr_stvec),
+
     // Interface to CSRs     ( SRAM like                    )
     .csr_access_i(csr_access),
     .csr_addr_i  (csr_addr),
@@ -1101,9 +1118,12 @@ module ibex_core import ibex_pkg::*; #(
     .irq_pending_o    (irq_pending_o),
     .irqs_o           (irqs),
     .csr_mstatus_mie_o(csr_mstatus_mie),
+    .csr_mstatus_sie_o(csr_mstatus_sie),
     .csr_mstatus_tw_o (csr_mstatus_tw),
     .csr_mepc_o       (csr_mepc),
     .csr_mtval_o      (crash_dump_mtval),
+    .trap_to_s_mode_i (trap_to_s_mode),
+    .csr_medeleg_o    (csr_medeleg),
 
     // PMP
     .csr_pmp_cfg_o    (csr_pmp_cfg),
@@ -1138,11 +1158,14 @@ module ibex_core import ibex_pkg::*; #(
     .csr_save_id_i     (csr_save_id),
     .csr_save_wb_i     (csr_save_wb),
     .csr_restore_mret_i(csr_restore_mret_id),
+    .csr_restore_sret_i(csr_restore_sret_id),
     .csr_restore_dret_i(csr_restore_dret_id),
     .csr_save_cause_i  (csr_save_cause),
     .csr_mcause_i      (exc_cause),
     .csr_mtval_i       (csr_mtval),
     .illegal_csr_insn_o(illegal_csr_insn_id),
+    .csr_mstatus_tvm_o (csr_mstatus_tvm),
+    .csr_mstatus_tsr_o (csr_mstatus_tsr),
 
     .double_fault_seen_o,
 
@@ -1302,6 +1325,10 @@ module ibex_core import ibex_pkg::*; #(
   logic            captured_nmi_int;
   logic            captured_debug_req;
   logic            captured_valid;
+  logic            m_irq_pending_core;
+  logic            s_irq_pending_core;
+  logic            m_irq_allowed_core;
+  logic            s_irq_allowed_core;
 
   // RVFI extension for co-simulation support
   // debug_req and MIP captured at IF -> ID transition so one extra stage
@@ -1474,8 +1501,32 @@ module ibex_core import ibex_pkg::*; #(
   assign new_debug_req = (debug_req_i & ~debug_mode);
   assign new_nmi = irq_nm_i & ~nmi_mode & ~debug_mode;
   assign new_nmi_int = id_stage_i.controller_i.irq_nm_int & ~nmi_mode & ~debug_mode;
-  assign new_irq = irq_pending_o & (csr_mstatus_mie || (priv_mode_id == PRIV_LVL_U)) & ~nmi_mode &
-                   ~debug_mode;
+  
+  assign m_irq_pending_core =
+      (irqs.irq_fast != 15'b0) |
+      irqs.irq_external |
+      irqs.irq_software |
+      irqs.irq_timer;
+
+  assign s_irq_pending_core =
+      irqs.irq_s_external |
+      irqs.irq_s_software |
+      irqs.irq_s_timer;
+
+  assign m_irq_allowed_core =
+      (priv_mode_id == PRIV_LVL_M) ? csr_mstatus_mie :
+      ((priv_mode_id == PRIV_LVL_S) || (priv_mode_id == PRIV_LVL_U)) ? 1'b1 :
+      1'b0;
+
+  assign s_irq_allowed_core =
+    (priv_mode_id == PRIV_LVL_U) ? 1'b1 :
+    (priv_mode_id == PRIV_LVL_S) ? csr_mstatus_sie : 1'b0;
+
+  assign new_irq =
+      ((m_irq_pending_core & m_irq_allowed_core) |
+      (s_irq_pending_core & s_irq_allowed_core)) &
+      ~nmi_mode &
+      ~debug_mode;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -1911,8 +1962,8 @@ module ibex_core import ibex_pkg::*; #(
   always_comb begin
     rvfi_set_trap_pc_d = rvfi_set_trap_pc_q;
 
-    if (pc_set && pc_mux_id == PC_EXC &&
-        (exc_pc_mux_id == EXC_PC_EXC || exc_pc_mux_id == EXC_PC_IRQ)) begin
+    if (pc_set && pc_mux_id == PC_EXC_M &&
+        (exc_pc_mux_id == EXC_PC_EXC_M || exc_pc_mux_id == EXC_PC_IRQ_M)) begin
       // PC is set to enter a trap handler
       rvfi_set_trap_pc_d = 1'b1;
     end else if (rvfi_set_trap_pc_q && rvfi_id_done) begin

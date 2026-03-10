@@ -117,6 +117,8 @@ module ibex_if_stage import ibex_pkg::*; #(
   input  logic [31:0]                 csr_mtvec_i,              // base PC to jump to on exception
   output logic                        csr_mtvec_init_o,         // tell CS regfile to init mtvec
 
+  input  logic [31:0]                 csr_stvec_i,             // base PC to jump to on interrupt in S-mode
+
   // pipeline stall
   input  logic                        id_in_ready_i,            // ID stage is ready for new instr
 
@@ -181,10 +183,12 @@ module ibex_if_stage import ibex_pkg::*; #(
 
   logic        [7:0] unused_boot_addr;
   logic        [7:0] unused_csr_mtvec;
+  logic        [7:0] unused_csr_stvec;
   logic              unused_exc_cause;
 
   assign unused_boot_addr = boot_addr_i[7:0];
   assign unused_csr_mtvec = csr_mtvec_i[7:0];
+  assign unused_csr_stvec = csr_stvec_i[7:0];
 
   assign unused_exc_cause = |{exc_cause.irq_ext, exc_cause.irq_int};
 
@@ -198,11 +202,18 @@ module ibex_if_stage import ibex_pkg::*; #(
     end
 
     unique case (exc_pc_mux_i)
-      EXC_PC_EXC:     exc_pc = { csr_mtvec_i[31:8], 8'h00                };
-      EXC_PC_IRQ:     exc_pc = { csr_mtvec_i[31:8], 1'b0, irq_vec, 2'b00 };
-      EXC_PC_DBD:     exc_pc = DmHaltAddr;
-      EXC_PC_DBG_EXC: exc_pc = DmExceptionAddr;
-      default:        exc_pc = { csr_mtvec_i[31:8], 8'h00                };
+      EXC_PC_EXC_M:     exc_pc = { csr_mtvec_i[31:8], 8'h00 };
+      EXC_PC_IRQ_M:     exc_pc = csr_mtvec_i[0] ?
+                                 ({ csr_mtvec_i[31:8], 8'h00 } + {{24{1'b0}}, irq_vec, 2'b00}) :
+                                 { csr_mtvec_i[31:8], 8'h00 };
+      // stvec only requires 4-byte alignment.
+      EXC_PC_EXC_S:     exc_pc = { csr_stvec_i[31:2], 2'b00 };
+      EXC_PC_IRQ_S:     exc_pc = csr_stvec_i[0] ?
+                                ({ csr_stvec_i[31:2], 2'b00 } + {{24{1'b0}}, irq_vec, 2'b00}) :
+                                { csr_stvec_i[31:2], 2'b00 };
+      EXC_PC_DBD:       exc_pc = DmHaltAddr;
+      EXC_PC_DBG_EXC:   exc_pc = DmExceptionAddr;
+      default:          exc_pc = { csr_mtvec_i[31:8], 8'h00 };
     endcase
   end
 
@@ -214,11 +225,12 @@ module ibex_if_stage import ibex_pkg::*; #(
   // fetch address selection mux
   always_comb begin : fetch_addr_mux
     unique case (pc_mux_internal)
-      PC_BOOT: fetch_addr_n = { boot_addr_i[31:8], 8'h80 };
-      PC_JUMP: fetch_addr_n = branch_target_ex_i;
-      PC_EXC:  fetch_addr_n = exc_pc;                       // set PC to exception handler
-      PC_ERET: fetch_addr_n = csr_mepc_i;                   // restore PC when returning from EXC
-      PC_DRET: fetch_addr_n = csr_depc_i;
+      PC_BOOT:    fetch_addr_n = { boot_addr_i[31:8], 8'h80 };
+      PC_JUMP:    fetch_addr_n = branch_target_ex_i;
+      PC_EXC_M:   fetch_addr_n = exc_pc;                       // vectored exceptions
+      PC_EXC_S:   fetch_addr_n = exc_pc;                       // vectored exceptions, but with a different base address
+      PC_ERET:    fetch_addr_n = csr_mepc_i;                   // restore PC when returning from EXC
+      PC_DRET:    fetch_addr_n = csr_depc_i;
       // Without branch predictor will never get pc_mux_internal == PC_BP. We still handle no branch
       // predictor case here to ensure redundant mux logic isn't synthesised.
       PC_BP:   fetch_addr_n = BranchPredictor ? predict_branch_pc : { boot_addr_i[31:8], 8'h80 };
@@ -729,7 +741,8 @@ module ibex_if_stage import ibex_pkg::*; #(
     `ASSERT_IF(IbexPcMuxValid, pc_mux_internal inside {
         PC_BOOT,
         PC_JUMP,
-        PC_EXC,
+        PC_EXC_M,
+        PC_EXC_S,
         PC_ERET,
         PC_DRET,
         PC_BP},
@@ -819,7 +832,8 @@ module ibex_if_stage import ibex_pkg::*; #(
     `ASSERT_IF(IbexPcMuxValid, pc_mux_internal inside {
         PC_BOOT,
         PC_JUMP,
-        PC_EXC,
+        PC_EXC_M,
+        PC_EXC_S,
         PC_ERET,
         PC_DRET},
       pc_set_i)
