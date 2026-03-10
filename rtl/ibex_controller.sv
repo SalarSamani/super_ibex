@@ -828,7 +828,7 @@ module ibex_controller #(
               exc_cause_o = ExcCauseInstrAccessFault;
               csr_mtval_o = instr_fetch_err_plus2_i ? (pc_id_i + 32'd2) : pc_id_i;
 
-              if (csr_medeleg_i[exc_cause_o.lower_cause] && priv_mode_i == PRIV_LVL_U) begin
+              if (csr_medeleg_i[exc_cause_o.lower_cause] && (priv_mode_i != PRIV_LVL_M)) begin
                 trap_to_s_mode_o = 1'b1;
               end
             end
@@ -836,7 +836,7 @@ module ibex_controller #(
               exc_cause_o = ExcCauseIllegalInsn;
               csr_mtval_o = instr_is_compressed_i ? {16'b0, instr_compressed_i} : instr_i;
 
-              if (csr_medeleg_i[exc_cause_o.lower_cause] && priv_mode_i == PRIV_LVL_U) begin
+              if (csr_medeleg_i[exc_cause_o.lower_cause] && (priv_mode_i != PRIV_LVL_M)) begin
                 trap_to_s_mode_o = 1'b1;
               end
             end
@@ -846,7 +846,7 @@ module ibex_controller #(
                             (priv_mode_i == PRIV_LVL_S) ? ExcCauseEcallSMode :
                                                           ExcCauseEcallUMode;
 
-              if (priv_mode_i == PRIV_LVL_U) begin
+              if (priv_mode_i != PRIV_LVL_M) begin
                 if (csr_medeleg_i[exc_cause_o.lower_cause]) trap_to_s_mode_o = 1'b1;
               end
               // Note: M-mode ecall (bit 11) can never be delegated.
@@ -862,7 +862,7 @@ module ibex_controller #(
               end else begin
                 // Raise a breakpoint exception (Cause 3)
                 exc_cause_o      = ExcCauseBreakpoint;
-                if (csr_medeleg_i[exc_cause_o.lower_cause] && priv_mode_i == PRIV_LVL_U) begin
+                if (csr_medeleg_i[exc_cause_o.lower_cause] && (priv_mode_i != PRIV_LVL_M)) begin
                   trap_to_s_mode_o = 1'b1;
                 end
               end
@@ -871,7 +871,7 @@ module ibex_controller #(
               exc_cause_o = ExcCauseStoreAccessFault;
               csr_mtval_o = lsu_addr_last_i;
 
-              if (csr_medeleg_i[exc_cause_o.lower_cause] && priv_mode_i == PRIV_LVL_U) begin
+              if (csr_medeleg_i[exc_cause_o.lower_cause] && (priv_mode_i != PRIV_LVL_M)) begin
                 trap_to_s_mode_o = 1'b1;
               end
             end
@@ -879,7 +879,7 @@ module ibex_controller #(
               exc_cause_o = ExcCauseLoadAccessFault;
               csr_mtval_o = lsu_addr_last_i;
 
-              if (csr_medeleg_i[exc_cause_o.lower_cause] && priv_mode_i == PRIV_LVL_U) begin
+              if (csr_medeleg_i[exc_cause_o.lower_cause] && (priv_mode_i != PRIV_LVL_M)) begin
                 trap_to_s_mode_o = 1'b1;
               end
             end
