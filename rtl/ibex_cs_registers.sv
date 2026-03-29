@@ -73,6 +73,11 @@ module ibex_cs_registers import ibex_pkg::*; #(
   output logic [31:0]          csr_mepc_o,
   output logic [31:0]          csr_mtval_o,
 
+  // MMU
+  output logic [31:0]          csr_satp_o,
+  output logic                 csr_mstatus_sum_o,
+  output logic                 csr_mstatus_mxr_o,
+
   // PMP
   output ibex_pkg::pmp_cfg_t     csr_pmp_cfg_o  [PMPNumRegions],
   output logic [PMP_ADDR_MSB:0]  csr_pmp_addr_o [PMPNumRegions],
@@ -1156,8 +1161,11 @@ module ibex_cs_registers import ibex_pkg::*; #(
   assign csr_depc_o          = depc_q;
   assign csr_mtvec_o         = mtvec_q;
   assign csr_mtval_o         = mtval_q;
+  assign csr_satp_o          = satp_q;
 
   assign csr_mstatus_mie_o   = mstatus_q.mie;
+  assign csr_mstatus_sum_o   = mstatus_q.sum;
+  assign csr_mstatus_mxr_o   = mstatus_q.mxr;
   assign csr_mstatus_sie_o   = mstatus_q.sie;
   assign csr_mstatus_tw_o    = mstatus_q.tw;
   assign csr_medeleg_o       = medeleg_q;

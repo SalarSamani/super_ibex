@@ -6,6 +6,7 @@ ibex:
   files: [
     rtl/ibex_pkg.sv,
     rtl/ibex_alu.sv,
+    rtl/ibex_tlb.sv,
     rtl/ibex_compressed_decoder.sv,
     rtl/ibex_controller.sv,
     rtl/ibex_cs_registers.sv,
@@ -21,6 +22,7 @@ ibex:
     rtl/ibex_prefetch_buffer.sv,
     rtl/ibex_fetch_fifo.sv,
     rtl/ibex_pmp.sv,
+    rtl/ibex_ptw.sv,
     rtl/ibex_core.sv,
     shared/rtl/prim_assert.sv,
   ]

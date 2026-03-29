@@ -4,6 +4,7 @@
 
 ibex_pkg.sv
 ibex_alu.sv
+ibex_tlb.sv
 ibex_compressed_decoder.sv
 ibex_controller.sv
 ibex_counter.sv
@@ -18,4 +19,5 @@ ibex_multdiv_fast.sv
 ibex_prefetch_buffer.sv
 ibex_fetch_fifo.sv
 ibex_register_file_ff.sv
+ibex_ptw.sv
 ibex_core.sv

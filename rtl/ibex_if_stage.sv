@@ -80,6 +80,8 @@ module ibex_if_stage import ibex_pkg::*; #(
                                                                 // a taken branch
   output logic                        instr_fetch_err_o,        // bus error on fetch
   output logic                        instr_fetch_err_plus2_o,  // bus error misaligned
+  output logic                        instr_mmu_fault_o,        // MMU page fault on fetch
+  output logic [31:0]                 instr_mmu_fault_addr_o,   // faulting VA
   output logic                        illegal_c_insn_id_o,      // compressed decoder thinks this
                                                                 // is an invalid instr
   output logic                        dummy_instr_id_o,         // Instruction is a dummy
@@ -148,6 +150,8 @@ module ibex_if_stage import ibex_pkg::*; #(
   logic       [31:0] fetch_addr;
   logic              fetch_err;
   logic              fetch_err_plus2;
+  logic              fetch_mmu_fault;
+  logic       [31:0] fetch_mmu_fault_addr;
 
   logic [31:0]       instr_decompressed;
   logic              illegal_c_insn;
@@ -529,6 +533,8 @@ module ibex_if_stage import ibex_pkg::*; #(
         instr_rdata_alu_id_o     <= '0;
         instr_fetch_err_o        <= '0;
         instr_fetch_err_plus2_o  <= '0;
+        instr_mmu_fault_o        <= '0;
+        instr_mmu_fault_addr_o   <= '0;
         instr_rdata_c_id_o       <= '0;
         instr_is_compressed_id_o <= '0;
         instr_gets_expanded_id_o <= INSTR_NOT_EXPANDED;
@@ -541,6 +547,8 @@ module ibex_if_stage import ibex_pkg::*; #(
         instr_rdata_alu_id_o     <= instr_out;
         instr_fetch_err_o        <= instr_err_out;
         instr_fetch_err_plus2_o  <= if_instr_err_plus2;
+        instr_mmu_fault_o        <= fetch_mmu_fault;
+        instr_mmu_fault_addr_o   <= fetch_mmu_fault_addr;
         instr_rdata_c_id_o       <= if_instr_rdata[15:0];
         instr_is_compressed_id_o <= instr_is_compressed_out;
         instr_gets_expanded_id_o <= instr_gets_expanded_out;
@@ -557,6 +565,8 @@ module ibex_if_stage import ibex_pkg::*; #(
         instr_rdata_alu_id_o     <= instr_out;
         instr_fetch_err_o        <= instr_err_out;
         instr_fetch_err_plus2_o  <= if_instr_err_plus2;
+        instr_mmu_fault_o        <= fetch_mmu_fault;
+        instr_mmu_fault_addr_o   <= fetch_mmu_fault_addr;
         instr_rdata_c_id_o       <= if_instr_rdata[15:0];
         instr_is_compressed_id_o <= instr_is_compressed_out;
         instr_gets_expanded_id_o <= instr_gets_expanded_out;

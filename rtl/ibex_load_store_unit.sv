@@ -34,6 +34,14 @@ module ibex_load_store_unit #(
   output logic [MemDataWidth-1:0] data_wdata_o,
   input  logic [MemDataWidth-1:0] data_rdata_i,
 
+  // DTLB interface
+  output logic         dtlb_req_o,
+  output logic [31:0]  dtlb_vaddr_o,
+  input  logic [31:0]  dtlb_paddr_i,
+  input  logic         dtlb_hit_i,
+  input  logic         dtlb_page_fault_i,
+  input  logic         ptw_error_i,
+
   // signals to/from ID/EX stage
   input  logic         lsu_we_i,             // write enable                     -> from ID/EX
   input  logic [1:0]   lsu_type_i,           // data type: word, half word, byte -> from ID/EX
@@ -63,6 +71,8 @@ module ibex_load_store_unit #(
   output logic         load_resp_intg_err_o,
   output logic         store_err_o,
   output logic         store_resp_intg_err_o,
+  output logic         load_page_fault_o,
+  output logic         store_page_fault_o,
 
   output logic         busy_o,
 
@@ -72,6 +82,7 @@ module ibex_load_store_unit #(
 
   logic [31:0]  data_addr;
   logic [31:0]  data_addr_w_aligned;
+  logic [31:0]  dtlb_paddr_w_aligned;
   logic [31:0]  addr_last_q, addr_last_d;
 
   logic         addr_update;
@@ -100,6 +111,7 @@ module ibex_load_store_unit #(
   logic         pmp_err_q, pmp_err_d;
   logic         lsu_err_q, lsu_err_d;
   logic         data_intg_err, data_or_pmp_err;
+  logic         dtlb_fault_q, dtlb_fault_d;
 
   typedef enum logic [2:0]  {
     IDLE, WAIT_GNT_MIS, WAIT_RVALID_MIS, WAIT_GNT,
@@ -385,77 +397,151 @@ module ibex_load_store_unit #(
       IDLE: begin
         pmp_err_d = 1'b0;
         if (lsu_req_i) begin
-          data_req_o   = 1'b1;
-          pmp_err_d    = data_pmp_err_i;
-          lsu_err_d    = 1'b0;
-          perf_load_o  = ~lsu_we_i;
-          perf_store_o = lsu_we_i;
-
-          if (data_gnt_i) begin
-            ctrl_update         = 1'b1;
-            addr_update         = 1'b1;
-            handle_misaligned_d = split_misaligned_access;
-            ls_fsm_ns           = split_misaligned_access ? WAIT_RVALID_MIS : IDLE;
+          if (dtlb_fault_d) begin
+            // Synchronous Page fault or PTW error detected on the base address. 
+            // Abort the memory access entirely. Do not generate a bus request.
+            lsu_err_d    = 1'b1;
+            data_req_o   = 1'b0;
+            perf_load_o  = 1'b0;
+            perf_store_o = 1'b0;
+            ls_fsm_ns    = IDLE;
+          end else if (!dtlb_hit_i) begin
+            // TLB Miss detected. Stall the FSM while the PTW resolves the physical address.
+            // Force data_req_o to 0 to prevent dispatching an invalid physical address.
+            data_req_o   = 1'b0;
+            lsu_err_d    = 1'b0;
+            perf_load_o  = 1'b0;
+            perf_store_o = 1'b0;
+            ls_fsm_ns    = IDLE;
           end else begin
-            ls_fsm_ns           = split_misaligned_access ? WAIT_GNT_MIS    : WAIT_GNT;
+            // TLB Hit. The physical address is valid. Proceed with normal memory request.
+            data_req_o   = 1'b1;
+            pmp_err_d    = data_pmp_err_i;
+            lsu_err_d    = 1'b0;
+            perf_load_o  = ~lsu_we_i;
+            perf_store_o = lsu_we_i;
+            if (data_gnt_i) begin
+              ctrl_update         = 1'b1;
+              addr_update         = 1'b1;
+              handle_misaligned_d = split_misaligned_access;
+              ls_fsm_ns           = split_misaligned_access? WAIT_RVALID_MIS : IDLE;
+            end else begin
+              ls_fsm_ns           = split_misaligned_access? WAIT_GNT_MIS : WAIT_GNT;
+            end
           end
         end
       end
 
       WAIT_GNT_MIS: begin
-        data_req_o = 1'b1;
-        // data_pmp_err_i is valid during the address phase of a request. An error will block the
-        // external request and so a data_gnt_i might never be signalled. The registered version
-        // pmp_err_q is only updated for new address phases and so can be used in WAIT_GNT* and
-        // WAIT_RVALID* states
-        if (data_gnt_i || pmp_err_q) begin
-          addr_update         = 1'b1;
-          ctrl_update         = 1'b1;
-          handle_misaligned_d = 1'b1;
-          ls_fsm_ns           = WAIT_RVALID_MIS;
-        end
-      end
-
-      WAIT_RVALID_MIS: begin
-        // push out second request
-        data_req_o = 1'b1;
-        // tell ID/EX stage to update the address
-        addr_incr_req_o = 1'b1;
-
-        // first part rvalid is received, or gets a PMP error
-        if (data_rvalid_i || pmp_err_q) begin
-          // Update the PMP error for the second part
-          pmp_err_d = data_pmp_err_i;
-          // Record the error status of the first part
-          lsu_err_d = data_bus_err_i | pmp_err_q;
-          // Capture the first rdata for loads
-          rdata_update = ~data_we_q;
-          // If already granted, wait for second rvalid
-          ls_fsm_ns = data_gnt_i ? IDLE : WAIT_GNT;
-          // Update the address for the second part, if no error
-          addr_update = data_gnt_i & ~(data_bus_err_i | pmp_err_q);
-          // clear handle_misaligned if second request is granted
-          handle_misaligned_d = ~data_gnt_i;
+        // This state handles the scenario where the first part of a misaligned access was
+        // requested on the bus but was not yet granted by the external memory arbiter. The
+        // virtual address presented to the TLB has not changed since the IDLE state. However,
+        // we must maintain the TLB wait and fault logic. In highly complex microarchitectures,
+        // a TLB entry might be inexplicably evicted by a concurrent process or invalidation
+        // command during the wait for a bus grant. Defensive design mandates continuous
+        // coverage against such edge cases.
+        if (dtlb_fault_d) begin
+          // If the TLB faults while waiting for a grant, we must abort.
+          lsu_err_d  = 1'b1;
+          data_req_o = 1'b0;
+          ls_fsm_ns  = IDLE;
+        end else if (!dtlb_hit_i) begin
+          // If the TLB entry was evicted, suspend the bus request and wait.
+          data_req_o = 1'b0;
         end else begin
-          // first part rvalid is NOT received
-          if (data_gnt_i) begin
-            // second grant is received
-            ls_fsm_ns = WAIT_RVALID_MIS_GNTS_DONE;
-            handle_misaligned_d = 1'b0;
+          // Normal operation: assert request and wait for grant.
+          data_req_o = 1'b1;
+          // data_pmp_err_i is valid during the address phase of a request.
+          if (data_gnt_i || pmp_err_q) begin
+            addr_update         = 1'b1;
+            ctrl_update         = 1'b1;
+            handle_misaligned_d = 1'b1;
+            ls_fsm_ns           = WAIT_RVALID_MIS;
           end
         end
       end
 
+      WAIT_RVALID_MIS: begin
+        // Tell ID/EX stage to update the address to target the second half
+        addr_incr_req_o = 1'b1;
+
+        if (dtlb_fault_d) begin
+          // A page fault occurred on the SECOND page of the unaligned access.
+          // We must permanently suppress the second data request and flag the error.
+          data_req_o = 1'b0;
+          
+          // We must still patiently await the completion of the FIRST half.
+          if (data_rvalid_i || pmp_err_q) begin
+            // Receive the response from the first half
+            pmp_err_d = data_pmp_err_i;
+            // Override any bus errors with the catastrophic page fault error
+            lsu_err_d = 1'b1; 
+            rdata_update = ~data_we_q;
+            // Abort the second access and return to IDLE
+            ls_fsm_ns = IDLE; 
+            handle_misaligned_d = 1'b0;
+          end
+        end else if (!dtlb_hit_i) begin
+          // TLB miss on the second page. Wait for the PTW to resolve the new page.
+          // Suppress the second data request to prevent illegal bus activity.
+          data_req_o = 1'b0;
+          
+          // However, we must continuously monitor for the read data from the first half!
+          if (data_rvalid_i || pmp_err_q) begin
+            pmp_err_d = data_pmp_err_i;
+            lsu_err_d = data_bus_err_i | pmp_err_q;
+            rdata_update = ~data_we_q;
+            // The first half is complete, but we must stay in WAIT_RVALID_MIS 
+            // to continually retry the second request once the TLB finally hits.
+          end
+        end else begin
+          // TLB Hit for the second page. Push out the second memory request.
+          data_req_o = 1'b1;
+
+          if (data_rvalid_i || pmp_err_q) begin
+            // First part rvalid is received, or a PMP error was detected
+            pmp_err_d = data_pmp_err_i;
+            lsu_err_d = data_bus_err_i | pmp_err_q;
+            rdata_update = ~data_we_q;
+            
+            // If the second request is already granted in the same cycle, finish.
+            ls_fsm_ns = data_gnt_i? IDLE : WAIT_GNT;
+            addr_update = data_gnt_i & ~(data_bus_err_i | pmp_err_q);
+            handle_misaligned_d = ~data_gnt_i;
+          end else begin
+            // First part rvalid is NOT received yet.
+            if (data_gnt_i) begin
+              // But the second request was granted early. Wait for rvalid safely.
+              ls_fsm_ns = WAIT_RVALID_MIS_GNTS_DONE;
+              handle_misaligned_d = 1'b0;
+            end
+          end
+        end
+      end
+      
       WAIT_GNT: begin
-        // tell ID/EX stage to update the address
+        // Tell ID/EX stage to hold the incremented address if necessary
         addr_incr_req_o = handle_misaligned_q;
-        data_req_o      = 1'b1;
-        if (data_gnt_i || pmp_err_q) begin
-          ctrl_update         = 1'b1;
-          // Update the address, unless there was an error
-          addr_update         = ~lsu_err_q;
-          ls_fsm_ns           = IDLE;
+
+        if (dtlb_fault_d) begin
+          // Fault detected. Abort the pending transaction.
+          data_req_o = 1'b0;
+          lsu_err_d  = 1'b1;
+          ls_fsm_ns  = IDLE;
           handle_misaligned_d = 1'b0;
+        end else if (!dtlb_hit_i) begin
+          // TLB Miss. Suppress the request and stall.
+          data_req_o = 1'b0; 
+        end else begin
+          // TLB Hit. Assert request and wait for grant.
+          data_req_o = 1'b1;
+          if (data_gnt_i || pmp_err_q) begin
+            ctrl_update = 1'b1;
+            // Update the address, unless there was an error
+            addr_update = ~lsu_err_q;
+            ls_fsm_ns   = IDLE;
+            handle_misaligned_d = 1'b0;
+          end
         end
       end
 
@@ -493,11 +579,13 @@ module ibex_load_store_unit #(
       handle_misaligned_q <= '0;
       pmp_err_q           <= '0;
       lsu_err_q           <= '0;
+      dtlb_fault_q        <= '0;
     end else begin
       ls_fsm_cs           <= ls_fsm_ns;
       handle_misaligned_q <= handle_misaligned_d;
       pmp_err_q           <= pmp_err_d;
       lsu_err_q           <= lsu_err_d;
+      dtlb_fault_q        <= dtlb_fault_d;
     end
   end
 
@@ -506,7 +594,7 @@ module ibex_load_store_unit #(
   /////////////
 
   assign data_or_pmp_err    = lsu_err_q | data_bus_err_i | pmp_err_q;
-  assign lsu_resp_valid_o   = (data_rvalid_i | pmp_err_q) & (ls_fsm_cs == IDLE);
+  assign lsu_resp_valid_o   = (data_rvalid_i | pmp_err_q | dtlb_fault_q) & (ls_fsm_cs == IDLE);
   assign lsu_rdata_valid_o  =
     (ls_fsm_cs == IDLE) & data_rvalid_i & ~data_or_pmp_err & ~data_we_q & ~data_intg_err;
 
@@ -516,8 +604,14 @@ module ibex_load_store_unit #(
   // output data address must be word aligned
   assign data_addr_w_aligned = {data_addr[31:2], 2'b00};
 
+  // output to DTLB interface
+  assign dtlb_req_o           = lsu_req_i | (ls_fsm_cs != IDLE);
+  assign dtlb_vaddr_o         = data_addr_w_aligned;
+  assign dtlb_paddr_w_aligned = {dtlb_paddr_i[31:2], 2'b00};
+  assign dtlb_fault_d         = dtlb_req_o & (dtlb_page_fault_i | ptw_error_i);
+
   // output to data interface
-  assign data_addr_o   = data_addr_w_aligned;
+  assign data_addr_o   = dtlb_paddr_w_aligned;
   assign data_we_o     = lsu_we_i;
   assign data_be_o     = data_be;
 
@@ -551,6 +645,13 @@ module ibex_load_store_unit #(
   // data_req_o which is undesirable.
   assign load_resp_intg_err_o  = data_intg_err & data_rvalid_i & ~data_we_q;
   assign store_resp_intg_err_o = data_intg_err & data_rvalid_i & data_we_q;
+
+  // Signal a load or store page fault depending on the transaction type currently outstanding.
+  // The fault is mathematically valid if an active TLB request generated a fault flag.
+  // Because these MMU exceptions are synchronous and caught prior to memory access,
+  // they are raised immediately without waiting for the lsu_resp_valid_o signal.
+  assign load_page_fault_o  = dtlb_fault_q & ~data_we_q;
+  assign store_page_fault_o = dtlb_fault_q &  data_we_q;
 
   assign busy_o = (ls_fsm_cs != IDLE);
 

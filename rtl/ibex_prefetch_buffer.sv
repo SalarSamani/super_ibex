@@ -27,6 +27,14 @@ module ibex_prefetch_buffer #(
   output logic        err_o,
   output logic        err_plus2_o,
 
+  // TLB
+  output logic        itlb_req_o,
+  output logic [31:0] itlb_vaddr_o,
+  input  logic [31:0] itlb_paddr_i,
+  input  logic        itlb_hit_i,
+  input  logic        itlb_page_fault_i,
+  input  logic        ptw_error_i,
+
   // goes to instruction memory / instruction cache
   output logic        instr_req_o,
   input  logic        instr_gnt_i,
@@ -34,6 +42,10 @@ module ibex_prefetch_buffer #(
   input  logic [31:0] instr_rdata_i,
   input  logic        instr_err_i,
   input  logic        instr_rvalid_i,
+
+  // MMU fault
+  output logic        instr_mmu_fault_o,
+  output logic [31:0] instr_mmu_fault_addr_o,
 
   // Prefetch Buffer Status
   output logic        busy_o
@@ -59,6 +71,9 @@ module ibex_prefetch_buffer #(
   logic                fifo_ready;
   logic                fifo_clear;
   logic [NUM_REQS-1:0] fifo_busy;
+
+  logic                mmu_fault;
+  logic [31:0]         mmu_fault_addr;
 
   ////////////////////////////
   // Prefetch buffer status //
@@ -258,7 +273,17 @@ module ibex_prefetch_buffer #(
   // Outputs //
   /////////////
 
-  assign instr_req_o  = valid_req;
-  assign instr_addr_o = instr_addr_w_aligned;
+  assign itlb_req_o    = valid_req;
+  assign itlb_vaddr_o  = instr_addr_w_aligned;
+
+  assign instr_req_o   = valid_req & itlb_hit_i & ~itlb_page_fault_i & ~ptw_error_i;
+  assign instr_addr_o  = {itlb_paddr_i[31:2], 2'b00};
+
+  // MMU fault detection: fault occurs when translation is requested but results in fault
+  assign mmu_fault      = valid_req & (~itlb_hit_i | itlb_page_fault_i | ptw_error_i);
+  assign mmu_fault_addr = instr_addr_w_aligned;
+
+  assign instr_mmu_fault_o      = mmu_fault;
+  assign instr_mmu_fault_addr_o = mmu_fault_addr;
 
 endmodule

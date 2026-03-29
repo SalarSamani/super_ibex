@@ -61,6 +61,8 @@ module ibex_id_stage #(
   input  logic                      illegal_c_insn_i,
   input  logic                      instr_fetch_err_i,
   input  logic                      instr_fetch_err_plus2_i,
+  input  logic                      instr_mmu_fault_i,
+  input  logic [31:0]               instr_mmu_fault_addr_i,
 
   input  logic [31:0]               pc_id_i,
 
@@ -138,8 +140,10 @@ module ibex_id_stage #(
   output logic                      nmi_mode_o,
 
   input  logic                      lsu_load_err_i,
+  input  logic                      lsu_load_page_fault_i,
   input  logic                      lsu_load_resp_intg_err_i,
   input  logic                      lsu_store_err_i,
+  input  logic                      lsu_store_page_fault_i,
   input  logic                      lsu_store_resp_intg_err_i,
 
   output logic                      expecting_load_resp_o,
@@ -260,8 +264,8 @@ module ibex_id_stage #(
   logic        rf_ren_a_dec, rf_ren_b_dec;
 
   // Read enables should only be asserted for valid and legal instructions
-  assign rf_ren_a = instr_valid_i & ~instr_fetch_err_i & ~illegal_insn_o & rf_ren_a_dec;
-  assign rf_ren_b = instr_valid_i & ~instr_fetch_err_i & ~illegal_insn_o & rf_ren_b_dec;
+  assign rf_ren_a = instr_valid_i & ~instr_fetch_err_i & ~instr_mmu_fault_i & ~illegal_insn_o & rf_ren_a_dec;
+  assign rf_ren_b = instr_valid_i & ~instr_fetch_err_i & ~instr_mmu_fault_i & ~illegal_insn_o & rf_ren_b_dec;
 
   assign rf_ren_a_o = rf_ren_a;
   assign rf_ren_b_o = rf_ren_b;
@@ -582,6 +586,8 @@ module ibex_id_stage #(
     .instr_bp_taken_i       (instr_bp_taken_i),
     .instr_fetch_err_i      (instr_fetch_err_i),
     .instr_fetch_err_plus2_i(instr_fetch_err_plus2_i),
+    .instr_mmu_fault_i      (instr_mmu_fault_i),
+    .instr_mmu_fault_addr_i (instr_mmu_fault_addr_i),
     .pc_id_i                (pc_id_i),
 
     // to IF-ID pipeline
@@ -601,8 +607,10 @@ module ibex_id_stage #(
     // LSU
     .lsu_addr_last_i    (lsu_addr_last_i),
     .load_err_i         (lsu_load_err_i),
+    .load_page_fault_i  (lsu_load_page_fault_i),
     .mem_resp_intg_err_i(mem_resp_intg_err),
     .store_err_i        (lsu_store_err_i),
+    .store_page_fault_i (lsu_store_page_fault_i),
     .wb_exception_o     (wb_exception),
     .id_exception_o     (id_exception),
 
@@ -941,8 +949,9 @@ module ibex_id_stage #(
     //   This either happens in preparation for a flush and jump to an exception handler e.g. in
     //   response to an IRQ or debug request or whilst the core is sleeping or resetting/fetching
     //   first instruction in which case any valid instruction in ID/EX should be ignored.
-    // - There was an error on instruction fetch
+    // - There was an error on instruction fetch or MMU fault
     assign instr_kill = instr_fetch_err_i |
+                        instr_mmu_fault_i |
                         wb_exception      |
                         id_exception      |
                         ~controller_run;
@@ -965,6 +974,7 @@ module ibex_id_stage #(
     // exceptions from writeback have been resolved.
     assign instr_executing_spec = instr_valid_i      &
                                   ~instr_fetch_err_i &
+                                  ~instr_mmu_fault_i &
                                   controller_run     &
                                   ~stall_ld_hz;
 
@@ -1042,8 +1052,8 @@ module ibex_id_stage #(
     // No load hazards without Writeback Stage
     assign stall_ld_hz   = 1'b0;
 
-    // Without writeback stage any valid instruction that hasn't seen an error will execute
-    assign instr_executing_spec = instr_valid_i & ~instr_fetch_err_i & controller_run;
+    // Without writeback stage any valid instruction that hasn't seen an error or MMU fault will execute
+    assign instr_executing_spec = instr_valid_i & ~instr_fetch_err_i & ~instr_mmu_fault_i & controller_run;
     assign instr_executing = instr_executing_spec;
 
     `ASSERT(IbexStallIfValidInstrNotExecuting,
@@ -1096,7 +1106,7 @@ module ibex_id_stage #(
   // Signal which instructions to count as retired in minstret, all traps along with ebrk and
   // ecall instructions are not counted.
   assign instr_perf_count_id_o = ~ebrk_insn & ~ecall_insn_dec & ~illegal_insn_dec &
-      ~illegal_csr_insn_i & ~instr_fetch_err_i;
+      ~illegal_csr_insn_i & ~instr_fetch_err_i & ~instr_mmu_fault_i;
 
   // An instruction is ready to move to the writeback stage (or retire if there is no writeback
   // stage)

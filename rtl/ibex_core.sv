@@ -194,6 +194,8 @@ module ibex_core import ibex_pkg::*; #(
   logic        instr_bp_taken_id;
   logic        instr_fetch_err;                // Bus error on instr fetch
   logic        instr_fetch_err_plus2;          // Instruction error is misaligned
+  logic        instr_mmu_fault;                // MMU page fault on instr fetch
+  logic [31:0] instr_mmu_fault_addr;           // Faulting virtual instruction address
   logic        illegal_c_insn_id;              // Illegal compressed instruction sent to ID stage
   logic [31:0] pc_if;                          // Program counter in IF stage
   logic [31:0] pc_id;                          // Program counter in ID stage
@@ -224,7 +226,9 @@ module ibex_core import ibex_pkg::*; #(
 
   logic        instr_intg_err;
   logic        lsu_load_err, lsu_load_err_raw;
+  logic        lsu_load_page_fault, lsu_load_page_fault_raw;
   logic        lsu_store_err, lsu_store_err_raw;
+  logic        lsu_store_page_fault, lsu_store_page_fault_raw;
   logic        lsu_load_resp_intg_err;
   logic        lsu_store_resp_intg_err;
 
@@ -489,6 +493,8 @@ module ibex_core import ibex_pkg::*; #(
     .instr_bp_taken_o        (instr_bp_taken_id),
     .instr_fetch_err_o       (instr_fetch_err),
     .instr_fetch_err_plus2_o (instr_fetch_err_plus2),
+    .instr_mmu_fault_o       (instr_mmu_fault),
+    .instr_mmu_fault_addr_o  (instr_mmu_fault_addr),
     .illegal_c_insn_id_o     (illegal_c_insn_id),
     .dummy_instr_id_o        (dummy_instr_id),
     .pc_if_o                 (pc_if),
@@ -604,6 +610,8 @@ module ibex_core import ibex_pkg::*; #(
     .instr_fetch_err_i      (instr_fetch_err),
     .instr_fetch_err_plus2_i(instr_fetch_err_plus2),
     .illegal_c_insn_i       (illegal_c_insn_id),
+    .instr_mmu_fault_i      (instr_mmu_fault),
+    .instr_mmu_fault_addr_i (instr_mmu_fault_addr),
 
     .pc_id_i(pc_id),
 
@@ -666,8 +674,10 @@ module ibex_core import ibex_pkg::*; #(
     .lsu_addr_last_i    (lsu_addr_last),
 
     .lsu_load_err_i           (lsu_load_err),
+    .lsu_load_page_fault_i    (lsu_load_page_fault),
     .lsu_load_resp_intg_err_i (lsu_load_resp_intg_err),
     .lsu_store_err_i          (lsu_store_err),
+    .lsu_store_page_fault_i   (lsu_store_page_fault),
     .lsu_store_resp_intg_err_i(lsu_store_resp_intg_err),
 
     .expecting_load_resp_o (expecting_load_resp_id),
@@ -782,7 +792,7 @@ module ibex_core import ibex_pkg::*; #(
   /////////////////////
 
   assign data_req_o   = data_req_out & ~pmp_req_err[PMP_D];
-  assign lsu_resp_err = lsu_load_err | lsu_store_err;
+  assign lsu_resp_err = lsu_load_err | lsu_store_err | lsu_load_page_fault | lsu_store_page_fault;
 
   ibex_load_store_unit #(
     .MemECC(MemECC),
@@ -825,8 +835,10 @@ module ibex_core import ibex_pkg::*; #(
 
     // exception signals
     .load_err_o           (lsu_load_err_raw),
+    .load_page_fault_o    (lsu_load_page_fault_raw),
     .load_resp_intg_err_o (lsu_load_resp_intg_err),
     .store_err_o          (lsu_store_err_raw),
+    .store_page_fault_o   (lsu_store_page_fault_raw),
     .store_resp_intg_err_o(lsu_store_resp_intg_err),
 
     .busy_o(lsu_busy),
@@ -884,15 +896,19 @@ module ibex_core import ibex_pkg::*; #(
   if (SecureIbex) begin : g_check_mem_response
     // For secure configurations only process load/store responses if we're expecting them to guard
     // against false responses being injected on to the bus
-    assign lsu_load_err  = lsu_load_err_raw  & (outstanding_load_wb  | expecting_load_resp_id);
-    assign lsu_store_err = lsu_store_err_raw & (outstanding_store_wb | expecting_store_resp_id);
+    assign lsu_load_err         = lsu_load_err_raw         & (outstanding_load_wb  | expecting_load_resp_id);
+    assign lsu_load_page_fault  = lsu_load_page_fault_raw  & (outstanding_load_wb  | expecting_load_resp_id);
+    assign lsu_store_err        = lsu_store_err_raw        & (outstanding_store_wb | expecting_store_resp_id);
+    assign lsu_store_page_fault = lsu_store_page_fault_raw & (outstanding_store_wb | expecting_store_resp_id);
     assign rf_we_lsu     = lsu_rdata_valid   & (outstanding_load_wb  | expecting_load_resp_id);
   end else begin : g_no_check_mem_response
     // For non-secure configurations trust the bus protocol is being followed and we'll only ever
     // see a response if we have an outstanding request.
-    assign lsu_load_err  = lsu_load_err_raw;
-    assign lsu_store_err = lsu_store_err_raw;
-    assign rf_we_lsu     = lsu_rdata_valid;
+    assign lsu_load_err         = lsu_load_err_raw;
+    assign lsu_load_page_fault  = lsu_load_page_fault_raw;
+    assign lsu_store_err        = lsu_store_err_raw;
+    assign lsu_store_page_fault = lsu_store_page_fault_raw;
+    assign rf_we_lsu            = lsu_rdata_valid;
 
     // expected_load_resp_id/expected_store_resp_id signals are only used to guard against false
     // responses so they are unused in non-secure configurations

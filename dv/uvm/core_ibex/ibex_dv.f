@@ -57,6 +57,7 @@ ${PRJ_DIR}/rtl/ibex_pkg.sv
 ${PRJ_DIR}/rtl/ibex_tracer_pkg.sv
 ${PRJ_DIR}/rtl/ibex_tracer.sv
 ${PRJ_DIR}/rtl/ibex_alu.sv
+${PRJ_DIR}/rtl/ibex_tlb.sv
 ${PRJ_DIR}/rtl/ibex_branch_predict.sv
 ${PRJ_DIR}/rtl/ibex_compressed_decoder.sv
 ${PRJ_DIR}/rtl/ibex_controller.sv
@@ -80,6 +81,7 @@ ${PRJ_DIR}/rtl/ibex_register_file_ff.sv
 ${PRJ_DIR}/rtl/ibex_register_file_fpga.sv
 ${PRJ_DIR}/rtl/ibex_register_file_latch.sv
 ${PRJ_DIR}/rtl/ibex_pmp.sv
+${PRJ_DIR}/rtl/ibex_ptw.sv
 ${PRJ_DIR}/rtl/ibex_core.sv
 ${PRJ_DIR}/rtl/ibex_top.sv
 ${PRJ_DIR}/rtl/ibex_top_tracing.sv

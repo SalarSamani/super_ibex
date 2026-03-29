@@ -375,6 +375,12 @@ package ibex_pkg;
     '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd09};
   localparam exc_cause_t ExcCauseEcallMMode =
     '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd11};
+  localparam exc_cause_t ExcCauseInstrPageFault =
+    '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd12};
+  localparam exc_cause_t ExcCauseLoadPageFault =
+    '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd13};
+  localparam exc_cause_t ExcCauseStorePageFault =
+    '{irq_ext: 1'b0, irq_int: 1'b0, lower_cause: 5'd15};
 
   // Internal NMI cause
   typedef enum logic [4:0] {
@@ -641,6 +647,34 @@ package ibex_pkg;
     CSR_CPUCTRLSTS     = 12'h7C0,
     CSR_SECURESEED     = 12'h7C1
   } csr_num_e;
+
+  // TLB Entry Format
+  typedef struct packed {
+    logic [19:0] vpn;
+    logic [21:0] ppn;
+    logic        d;
+    logic        a;
+    logic        u;
+    logic        x;
+    logic        w;
+    logic        r;
+    logic        v;
+  } tlb_entry_t;
+
+  // Sv32 Page Table Entry "PTE" Format
+  typedef struct packed {
+    logic [11:0] ppn1;
+    logic [9:0]  ppn0;
+    logic [1:0]  rsw;
+    logic        d;
+    logic        a;
+    logic        g;
+    logic        u;
+    logic        x;
+    logic        w;
+    logic        r;
+    logic        v;
+  } sv32_pte_t;
 
   // CSR pmp-related offsets
   parameter logic [11:0] CSR_OFF_PMP_CFG  = 12'h3A0; // pmp_cfg  @ 12'h3a0 - 12'h3a3
