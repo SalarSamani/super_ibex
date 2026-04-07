@@ -601,7 +601,20 @@ module ibex_decoder #(
 
           // 1. First, check for SFENCE.VMA (it only uses the top 7 bits)
           if (instr[31:25] == 7'b000_1001) begin
+            // SFENCE.VMA is implemented as a jump to the next PC, giving the same frontend
+            // flushing behaviour as FENCE.I: the iside prefetch buffer is flushed, any
+            // outstanding iside requests are ignored, and the ICache (if present) is
+            // invalidated.  The separate TLB flush request is raised in ibex_id_stage via
+            // sfence_vma_insn_o / sfence_vma_req_o.
             sfence_vma_insn_o = 1'b1;
+            jump_in_dec_o     = 1'b1;
+
+            rf_we             = 1'b0;
+
+            if (instr_first_cycle_i) begin
+              jump_set_o     = 1'b1;
+              icache_inval_o = 1'b1;
+            end
           end
 
           // 2. Then check for other SYSTEM instructions based on the full 12 bits
@@ -1189,8 +1202,21 @@ module ibex_decoder #(
       OPCODE_SYSTEM: begin
         if (instr_alu[14:12] == 3'b000) begin
           // non CSR related SYSTEM instructions
-          alu_op_a_mux_sel_o = OP_A_REG_A;
-          alu_op_b_mux_sel_o = OP_B_IMM;
+          if (instr_alu[31:25] == 7'b000_1001) begin
+            // SFENCE.VMA will flush the IF stage, prefetch buffer and ICache if present.
+            if (BranchTargetALU) begin
+              bt_a_mux_sel_o     = OP_A_CURRPC;
+              bt_b_mux_sel_o     = IMM_B_INCR_PC;
+            end else begin
+              alu_op_a_mux_sel_o = OP_A_CURRPC;
+              alu_op_b_mux_sel_o = OP_B_IMM;
+              imm_b_mux_sel_o    = IMM_B_INCR_PC;
+              alu_operator_o     = ALU_ADD;
+            end
+          end else begin
+            alu_op_a_mux_sel_o = OP_A_REG_A;
+            alu_op_b_mux_sel_o = OP_B_IMM;
+          end
         end else begin
           // instruction to read/modify CSR
           imm_a_mux_sel_o    = IMM_A_Z;

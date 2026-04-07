@@ -265,7 +265,7 @@ module ibex_controller #(
 
   // These special requests only cause a pipeline flush and in particular don't cause a PC change
   // that is outside the normal execution flow
-  assign special_req_flush_only = wfi_insn | csr_pipe_flush | sfence_vma_insn;
+  assign special_req_flush_only = wfi_insn | csr_pipe_flush;
 
   // These special requests cause a change in PC
   assign special_req_pc_change = mret_insn | sret_insn | dret_insn | exc_req_d | exc_req_lsu;

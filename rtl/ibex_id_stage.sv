@@ -46,6 +46,7 @@ module ibex_id_stage #(
   output logic                      id_in_ready_o,         // ID stage is ready for next instr
   input  logic                      instr_exec_i,
   output logic                      icache_inval_o,
+  output logic                      sfence_vma_req_o,
 
   // Jumps and branches
   input  logic                      branch_decision_i,
@@ -525,6 +526,10 @@ module ibex_id_stage #(
     .jump_in_dec_o  (jump_in_dec),
     .branch_in_dec_o(branch_in_dec)
   );
+
+  // SFENCE.VMA requests a TLB flush on the first execution cycle, coinciding with the
+  // frontend flush (jump_set / icache_inval) that the decoder also raises at that point.
+  assign sfence_vma_req_o = sfence_vma_insn_dec & instr_first_cycle;
 
   // Flush pipe on most CSR modification. Some CSR modifications alter how instructions execute
   // (e.g. the PMP CSRs) so this ensures all instructions always see the latest architectural state

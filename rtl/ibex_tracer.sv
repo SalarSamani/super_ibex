@@ -1033,6 +1033,7 @@ module ibex_tracer (
         INSN_MRET:       decode_mnemonic("mret");
         INSN_DRET:       decode_mnemonic("dret");
         INSN_WFI:        decode_mnemonic("wfi");
+        INSN_SFENCE_VMA: decode_mnemonic("sfence.vma");
         // RV32M
         INSN_PMUL:       decode_r_insn("mul");
         INSN_PMUH:       decode_r_insn("mulh");

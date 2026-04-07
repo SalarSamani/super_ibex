@@ -80,6 +80,15 @@ module ibex_if_stage import ibex_pkg::*; #(
                                                                 // a taken branch
   output logic                        instr_fetch_err_o,        // bus error on fetch
   output logic                        instr_fetch_err_plus2_o,  // bus error misaligned
+  
+  // TLB interface
+  output logic                        itlb_req_o,
+  output logic [31:0]                 itlb_vaddr_o,
+  input  logic [31:0]                 itlb_paddr_i,
+  input  logic                        itlb_hit_i,
+  input  logic                        itlb_page_fault_i,
+  input  logic                        ptw_error_i,
+
   output logic                        instr_mmu_fault_o,        // MMU page fault on fetch
   output logic [31:0]                 instr_mmu_fault_addr_o,   // faulting VA
   output logic                        illegal_c_insn_id_o,      // compressed decoder thinks this
@@ -334,6 +343,16 @@ module ibex_if_stage import ibex_pkg::*; #(
         .busy_o              ( prefetch_busy              ),
         .ecc_error_o         ( icache_ecc_error_o         )
     );
+    
+    // Unused TLB signals for icache (since icache doesn't do translation for now)
+    assign itlb_req_o           = 1'b0;
+    assign itlb_vaddr_o         = 32'b0;
+    assign fetch_mmu_fault      = 1'b0;
+    assign fetch_mmu_fault_addr = 32'b0;
+    
+    logic unused_itlb_sigs;
+    assign unused_itlb_sigs = ^{itlb_paddr_i, itlb_hit_i, itlb_page_fault_i, ptw_error_i};
+
   end else begin : gen_prefetch_buffer
     // prefetch buffer, caches a fixed number of instructions
     ibex_prefetch_buffer #(
@@ -360,6 +379,16 @@ module ibex_if_stage import ibex_pkg::*; #(
         .instr_rvalid_i      ( instr_rvalid_i             ),
         .instr_rdata_i       ( instr_rdata_i[31:0]        ),
         .instr_err_i         ( instr_err                  ),
+
+        .itlb_req_o          ( itlb_req_o                 ),
+        .itlb_vaddr_o        ( itlb_vaddr_o               ),
+        .itlb_paddr_i        ( itlb_paddr_i               ),
+        .itlb_hit_i          ( itlb_hit_i                 ),
+        .itlb_page_fault_i   ( itlb_page_fault_i          ),
+        .ptw_error_i         ( ptw_error_i                ),
+
+        .instr_mmu_fault_o      ( fetch_mmu_fault         ),
+        .instr_mmu_fault_addr_o ( fetch_mmu_fault_addr    ),
 
         .busy_o              ( prefetch_busy              )
     );

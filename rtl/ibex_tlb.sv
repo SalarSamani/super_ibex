@@ -24,7 +24,9 @@ module ibex_tlb import ibex_pkg::*; #(
   
   // Control and Invalidation
   input  logic                  flush_i,
+  /* verilator lint_off UNUSEDSIGNAL */
   input  logic [31:0]           csr_satp_i,
+  /* verilator lint_on UNUSEDSIGNAL */
   
   // PTW Fill Interface
   input  logic                  ptw_write_i,
@@ -40,7 +42,9 @@ module ibex_tlb import ibex_pkg::*; #(
   // Combinational signals
   logic [19:0]                    current_vpn;
   logic                           match_found;
+  /* verilator lint_off UNUSEDSIGNAL */
   tlb_entry_t                     matched_entry;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic                           mmu_enabled;
   logic                           perm_fault;
 
@@ -48,8 +52,8 @@ module ibex_tlb import ibex_pkg::*; #(
   
   assign current_vpn = vaddr_i[31:12];
   
-  // Translation is active only if csr_satp_i.MODE (bit 31) is 1
-  assign mmu_enabled = csr_satp_i[31];
+  // Translation is active only if csr_satp_i.MODE (bit 31) is 1 and privilege is not M-mode
+  assign mmu_enabled = csr_satp_i[31] && (priv_lvl_i != PRIV_LVL_M);
 
   // Fully associative tag matching
   always_comb begin
@@ -146,6 +150,6 @@ module ibex_tlb import ibex_pkg::*; #(
   assign page_fault_o = req_i && mmu_enabled && match_found && perm_fault;
   
   // Physical address concatenation: PPN from TLB, offset from VA
-  assign paddr_o      = mmu_enabled ? {matched_entry.ppn, vaddr_i[11:0]} : vaddr_i;
+  assign paddr_o      = mmu_enabled ? {matched_entry.ppn[19:0], vaddr_i[11:0]} : vaddr_i;
 
 endmodule

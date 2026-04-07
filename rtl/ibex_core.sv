@@ -196,6 +196,17 @@ module ibex_core import ibex_pkg::*; #(
   logic        instr_fetch_err_plus2;          // Instruction error is misaligned
   logic        instr_mmu_fault;                // MMU page fault on instr fetch
   logic [31:0] instr_mmu_fault_addr;           // Faulting virtual instruction address
+
+  // TLB & PTW signals
+  logic        itlb_req, dtlb_req;
+  logic [31:0] itlb_vaddr, dtlb_vaddr;
+  logic [31:0] itlb_paddr, dtlb_paddr;
+  logic        itlb_hit, dtlb_hit;
+  logic        itlb_page_fault, dtlb_page_fault;
+  logic        ptw_error;
+
+  logic        itlb_write, dtlb_write;
+  tlb_entry_t  ptw_tlb_entry;
   logic        illegal_c_insn_id;              // Illegal compressed instruction sent to ID stage
   logic [31:0] pc_if;                          // Program counter in IF stage
   logic [31:0] pc_id;                          // Program counter in ID stage
@@ -211,6 +222,7 @@ module ibex_core import ibex_pkg::*; #(
   logic [31:0] dummy_instr_seed;
   logic        icache_enable;
   logic        icache_inval;
+  logic        tlb_flush;
   logic        icache_ecc_error;
   logic        pc_mismatch_alert;
   logic        csr_shadow_err;
@@ -346,7 +358,13 @@ module ibex_core import ibex_pkg::*; #(
   pmp_cfg_t               csr_pmp_cfg  [PMPNumRegions];
   pmp_mseccfg_t           csr_pmp_mseccfg;
   logic                   pmp_req_err  [PMPNumChan];
+
+  logic [31:0]            csr_satp;
+  logic                   csr_mstatus_sum;
+  logic                   csr_mstatus_mxr;
+  /* verilator lint_off UNUSEDSIGNAL */
   logic                   data_req_out;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   logic        csr_save_if;
   logic        csr_save_id;
@@ -493,6 +511,15 @@ module ibex_core import ibex_pkg::*; #(
     .instr_bp_taken_o        (instr_bp_taken_id),
     .instr_fetch_err_o       (instr_fetch_err),
     .instr_fetch_err_plus2_o (instr_fetch_err_plus2),
+    
+    // TLB Interface
+    .itlb_req_o              (itlb_req),
+    .itlb_vaddr_o            (itlb_vaddr),
+    .itlb_paddr_i            (itlb_paddr),
+    .itlb_hit_i              (itlb_hit),
+    .itlb_page_fault_i       (itlb_page_fault),
+    .ptw_error_i             (ptw_error),
+
     .instr_mmu_fault_o       (instr_mmu_fault),
     .instr_mmu_fault_addr_o  (instr_mmu_fault_addr),
     .illegal_c_insn_id_o     (illegal_c_insn_id),
@@ -606,6 +633,7 @@ module ibex_core import ibex_pkg::*; #(
     .exc_pc_mux_o          (exc_pc_mux_id),
     .exc_cause_o           (exc_cause),
     .icache_inval_o        (icache_inval),
+    .sfence_vma_req_o      (tlb_flush),
 
     .instr_fetch_err_i      (instr_fetch_err),
     .instr_fetch_err_plus2_i(instr_fetch_err_plus2),
@@ -791,7 +819,87 @@ module ibex_core import ibex_pkg::*; #(
   // Load/store unit //
   /////////////////////
 
-  assign data_req_o   = data_req_out & ~pmp_req_err[PMP_D];
+  logic        lsu_data_req;
+  logic [31:0] lsu_data_addr;
+  logic        lsu_data_we;
+  logic [3:0]  lsu_data_be;
+  logic [31:0] lsu_data_wdata;
+  
+  logic        lsu_data_gnt;
+  logic        lsu_data_rvalid;
+  logic        lsu_data_err;
+
+  logic        ptw_mem_req;
+  logic [31:0] ptw_mem_addr;
+  logic        ptw_mem_gnt;
+  logic        ptw_mem_rvalid;
+  logic        ptw_mem_err;
+
+  logic        ptw_active_q;
+  logic        ptw_req_granted;
+  logic        lsu_in_flight_q, lsu_in_flight_d;
+
+  assign ptw_req_granted = ptw_mem_req & ptw_mem_gnt;
+
+  // PTW active tracking: asserted when a PTW bus transaction is in flight (granted but rvalid
+  // not yet received), so that rvalid and grant signals can be correctly routed to the PTW
+  // rather than the LSU.
+  //
+  // Case 1: grant & rvalid same cycle (zero-latency) : stay 0; transaction completes instantly
+  // Case 2: grant only                               : set 1; response still pending
+  // Case 3: rvalid while active                      : clear 0; response received
+  // Default: hold previous state
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) ptw_active_q <= 1'b0;
+    else         ptw_active_q <= (ptw_req_granted & data_rvalid_i) ? 1'b0 :
+                                 ptw_req_granted ? 1'b1 :
+                                 (ptw_active_q & data_rvalid_i) ? 1'b0 :
+                                 ptw_active_q;
+  end
+
+  // LSU in-flight tracking (OBI request/response):
+  //
+  // Case 1: req & gnt & rvalid (same cycle)
+  //   zero-latency transaction: starts and completes in one cycle : clear in-flight = 0
+  //
+  // Case 2: req & gnt (no rvalid yet)
+  //   new transaction issued : set in-flight = 1
+  //
+  // Case 3: rvalid & ~ptw_active_q
+  //   response for LSU arrives : clear in-flight = 0
+  //
+  // Default:
+  //   no event : hold previous state
+  //
+  assign lsu_in_flight_d = (lsu_data_req & data_gnt_i & data_rvalid_i) ? 1'b0 :
+                           (lsu_data_req & data_gnt_i) ? 1'b1 :
+                           (data_rvalid_i & ~ptw_active_q) ? 1'b0 :
+                           lsu_in_flight_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) lsu_in_flight_q <= 1'b0;
+    else         lsu_in_flight_q <= lsu_in_flight_d;
+  end
+
+  logic ptw_sel;
+  assign ptw_sel = ptw_active_q | (ptw_mem_req & ~lsu_data_req & ~lsu_in_flight_q);
+
+  assign data_req_out = lsu_data_req | ptw_mem_req; // For PMP checking
+  assign data_req_o   = ptw_sel ? ptw_mem_req : (lsu_data_req & ~pmp_req_err[PMP_D]);
+  assign data_addr_o  = ptw_sel ? ptw_mem_addr : lsu_data_addr;
+  assign data_we_o    = ptw_sel ? 1'b0         : lsu_data_we;
+  assign data_be_o    = ptw_sel ? 4'b1111      : lsu_data_be;
+  assign data_wdata_o = ptw_sel ? 32'b0        : lsu_data_wdata;
+
+  assign lsu_data_gnt    = data_gnt_i & ~ptw_sel;
+  assign ptw_mem_gnt     = data_gnt_i & ptw_sel;
+  
+  assign lsu_data_rvalid = data_rvalid_i & ~ptw_active_q;
+  assign ptw_mem_rvalid  = data_rvalid_i & ptw_active_q;
+  
+  assign lsu_data_err    = data_err_i & ~ptw_active_q;
+  assign ptw_mem_err     = data_err_i & ptw_active_q;
+
   assign lsu_resp_err = lsu_load_err | lsu_store_err | lsu_load_page_fault | lsu_store_page_fault;
 
   ibex_load_store_unit #(
@@ -802,17 +910,25 @@ module ibex_core import ibex_pkg::*; #(
     .rst_ni(rst_ni),
 
     // data interface
-    .data_req_o    (data_req_out),
-    .data_gnt_i    (data_gnt_i),
-    .data_rvalid_i (data_rvalid_i),
-    .data_bus_err_i(data_err_i),
+    .data_req_o    (lsu_data_req),
+    .data_gnt_i    (lsu_data_gnt),
+    .data_rvalid_i (lsu_data_rvalid),
+    .data_bus_err_i(lsu_data_err),
     .data_pmp_err_i(pmp_req_err[PMP_D]),
 
-    .data_addr_o      (data_addr_o),
-    .data_we_o        (data_we_o),
-    .data_be_o        (data_be_o),
-    .data_wdata_o     (data_wdata_o),
+    .data_addr_o      (lsu_data_addr),
+    .data_we_o        (lsu_data_we),
+    .data_be_o        (lsu_data_be),
+    .data_wdata_o     (lsu_data_wdata),
     .data_rdata_i     (data_rdata_i),
+
+    // DTLB Interface
+    .dtlb_req_o        (dtlb_req),
+    .dtlb_vaddr_o      (dtlb_vaddr),
+    .dtlb_paddr_i      (dtlb_paddr),
+    .dtlb_hit_i        (dtlb_hit),
+    .dtlb_page_fault_i (dtlb_page_fault),
+    .ptw_error_i       (ptw_error),
 
     // signals to/from ID/EX stage
     .lsu_we_i      (lsu_we),
@@ -1135,6 +1251,9 @@ module ibex_core import ibex_pkg::*; #(
     .irqs_o           (irqs),
     .csr_mstatus_mie_o(csr_mstatus_mie),
     .csr_mstatus_sie_o(csr_mstatus_sie),
+    .csr_satp_o       (csr_satp),
+    .csr_mstatus_sum_o(csr_mstatus_sum),
+    .csr_mstatus_mxr_o(csr_mstatus_mxr),
     .csr_mstatus_tw_o (csr_mstatus_tw),
     .csr_mepc_o       (csr_mepc),
     .csr_mtval_o      (crash_dump_mtval),
@@ -1261,6 +1380,83 @@ module ibex_core import ibex_pkg::*; #(
     assign pmp_req_err[PMP_I2] = 1'b0;
     assign pmp_req_err[PMP_D]  = 1'b0;
   end
+
+  // Instruction TLB
+  ibex_tlb #(
+    .TLB_ENTRIES(4)
+  ) itlb_i (
+    .clk_i            (clk_i),
+    .rst_ni           (rst_ni),
+
+    .req_i            (itlb_req),
+    .vaddr_i          (itlb_vaddr),
+    .priv_lvl_i       (priv_mode_id),
+    .mstatus_sum_i    (csr_mstatus_sum),
+    .mstatus_mxr_i    (csr_mstatus_mxr),
+    .is_instruction_i (1'b1),
+    .is_store_i       (1'b0),
+
+    .paddr_o          (itlb_paddr),
+    .hit_o            (itlb_hit),
+    .page_fault_o     (itlb_page_fault),
+
+    .flush_i          (tlb_flush),
+    .csr_satp_i       (csr_satp),
+
+    .ptw_write_i      (itlb_write),
+    .ptw_entry_i      (ptw_tlb_entry)
+  );
+
+  // Data TLB
+  ibex_tlb #(
+    .TLB_ENTRIES(4)
+  ) dtlb_i (
+    .clk_i            (clk_i),
+    .rst_ni           (rst_ni),
+
+    .req_i            (dtlb_req),
+    .vaddr_i          (dtlb_vaddr),
+    .priv_lvl_i       (priv_mode_lsu),
+    .mstatus_sum_i    (csr_mstatus_sum),
+    .mstatus_mxr_i    (csr_mstatus_mxr),
+    .is_instruction_i (1'b0),
+    .is_store_i       (lsu_data_we),
+
+    .paddr_o          (dtlb_paddr),
+    .hit_o            (dtlb_hit),
+    .page_fault_o     (dtlb_page_fault),
+
+    .flush_i          (tlb_flush),
+    .csr_satp_i       (csr_satp),
+
+    .ptw_write_i      (dtlb_write),
+    .ptw_entry_i      (ptw_tlb_entry)
+  );
+
+  // Page Table Walker
+  ibex_ptw ptw_i (
+    .clk_i            (clk_i),
+    .rst_ni           (rst_ni),
+
+    .itlb_req_i       (itlb_req & ~itlb_hit & ~itlb_page_fault),
+    .itlb_vaddr_i     (itlb_vaddr),
+    .dtlb_req_i       (dtlb_req & ~dtlb_hit & ~dtlb_page_fault),
+    .dtlb_vaddr_i     (dtlb_vaddr),
+
+    .itlb_write_o     (itlb_write),
+    .dtlb_write_o     (dtlb_write),
+    .tlb_entry_o      (ptw_tlb_entry),
+    .ptw_error_o      (ptw_error),
+
+    .ptw_mem_req_o    (ptw_mem_req),
+    .ptw_mem_addr_o   (ptw_mem_addr),
+    .ptw_mem_gnt_i    (ptw_mem_gnt),
+    .ptw_mem_rvalid_i (ptw_mem_rvalid),
+    .ptw_mem_rdata_i  (data_rdata_i),
+    .ptw_mem_err_i    (ptw_mem_err),
+
+    .satp_i           (csr_satp)
+  );
 
 `ifdef RVFI
   // When writeback stage is present RVFI information is emitted when instruction is finished in

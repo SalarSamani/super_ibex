@@ -26,7 +26,9 @@ module ibex_ptw import ibex_pkg::*; (
   input  logic [31:0]           ptw_mem_rdata_i,
   input  logic                  ptw_mem_err_i,
   
+  /* verilator lint_off UNUSEDSIGNAL */
   input  logic [31:0]           satp_i
+  /* verilator lint_on UNUSEDSIGNAL */
 );
 
   // Types and Signals
@@ -50,7 +52,9 @@ module ibex_ptw import ibex_pkg::*; (
   logic [21:0]  current_ppn_d;
   
   // Combinational signals
+  /* verilator lint_off UNUSEDSIGNAL */
   sv32_pte_t   incoming_pte;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   // Input Parsing
 
@@ -87,7 +91,7 @@ module ibex_ptw import ibex_pkg::*; (
       LVL1_REQ: begin
         ptw_mem_req_o  = 1'b1;
         // Level 1 Address Calculation: Base_PPN * 4096 + VPN[1] * 4
-        ptw_mem_addr_o = {current_ppn_q, active_vaddr_q[31:22], 2'b00};
+        ptw_mem_addr_o = {current_ppn_q[19:0], active_vaddr_q[31:22], 2'b00};
         
         if (ptw_mem_gnt_i) begin
           state_d = LVL1_WAIT;
@@ -112,8 +116,8 @@ module ibex_ptw import ibex_pkg::*; (
               tlb_entry_o.u   = incoming_pte.u; 
               tlb_entry_o.x   = incoming_pte.x;
               tlb_entry_o.w   = incoming_pte.w; 
-              tlb_entry_o.r   = incoming_pte.r;
-              tlb_entry_o.v   = 1'b1;
+              tlb_entry_o.r   = incoming_pte.r;              tlb_entry_o.a   = incoming_pte.a;
+              tlb_entry_o.d   = incoming_pte.d;              tlb_entry_o.v   = 1'b1;
               
               if (servicing_itlb_q) begin
                 itlb_write_o = 1'b1;
@@ -134,7 +138,7 @@ module ibex_ptw import ibex_pkg::*; (
       LVL0_REQ: begin
         ptw_mem_req_o  = 1'b1;
         // Level 0 Address Calculation: Next_PPN * 4096 + VPN[0] * 4
-        ptw_mem_addr_o = {current_ppn_q, active_vaddr_q[21:12], 2'b00};
+        ptw_mem_addr_o = {current_ppn_q[19:0], active_vaddr_q[21:12], 2'b00};
         
         if (ptw_mem_gnt_i) begin
           state_d = LVL0_WAIT;
@@ -155,7 +159,9 @@ module ibex_ptw import ibex_pkg::*; (
             tlb_entry_o.u   = incoming_pte.u; 
             tlb_entry_o.x   = incoming_pte.x;
             tlb_entry_o.w   = incoming_pte.w; 
-            tlb_entry_o.r   = incoming_pte.r;
+            tlb_entry_o.r   = incoming_pte.r;            
+            tlb_entry_o.a   = incoming_pte.a;
+            tlb_entry_o.d   = incoming_pte.d;            
             tlb_entry_o.v   = 1'b1;
             
             if (servicing_itlb_q) begin

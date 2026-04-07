@@ -37,7 +37,9 @@ module ibex_load_store_unit #(
   // DTLB interface
   output logic         dtlb_req_o,
   output logic [31:0]  dtlb_vaddr_o,
+  /* verilator lint_off UNUSEDSIGNAL */
   input  logic [31:0]  dtlb_paddr_i,
+  /* verilator lint_on UNUSEDSIGNAL */
   input  logic         dtlb_hit_i,
   input  logic         dtlb_page_fault_i,
   input  logic         ptw_error_i,
@@ -112,6 +114,10 @@ module ibex_load_store_unit #(
   logic         lsu_err_q, lsu_err_d;
   logic         data_intg_err, data_or_pmp_err;
   logic         dtlb_fault_q, dtlb_fault_d;
+  // Set when the first rvalid of a misaligned access is consumed while stalled for a TLB miss
+  // (WAIT_RVALID_MIS, !dtlb_hit path).  In that case WAIT_RVALID_MIS_GNTS_DONE holds the
+  // *second* (final) rvalid and must assert lsu_resp_valid_o itself rather than relying on IDLE.
+  logic         mis_rvalid1_done_q, mis_rvalid1_done_d;
 
   typedef enum logic [2:0]  {
     IDLE, WAIT_GNT_MIS, WAIT_RVALID_MIS, WAIT_GNT,
@@ -382,6 +388,7 @@ module ibex_load_store_unit #(
     data_req_o          = 1'b0;
     addr_incr_req_o     = 1'b0;
     handle_misaligned_d = handle_misaligned_q;
+    mis_rvalid1_done_d  = mis_rvalid1_done_q;
     pmp_err_d           = pmp_err_q;
     lsu_err_d           = lsu_err_q;
 
@@ -398,8 +405,12 @@ module ibex_load_store_unit #(
         pmp_err_d = 1'b0;
         if (lsu_req_i) begin
           if (dtlb_fault_d) begin
-            // Synchronous Page fault or PTW error detected on the base address. 
+            // Synchronous Page fault or PTW error detected on the base address.
             // Abort the memory access entirely. Do not generate a bus request.
+            // ctrl_update must be set so data_we_q captures the current lsu_we_i;
+            // without it, data_we_q retains the previous transaction's value and
+            // load_page_fault_o / store_page_fault_o are mis-reported.
+            ctrl_update  = 1'b1;
             lsu_err_d    = 1'b1;
             data_req_o   = 1'b0;
             perf_load_o  = 1'b0;
@@ -412,7 +423,7 @@ module ibex_load_store_unit #(
             lsu_err_d    = 1'b0;
             perf_load_o  = 1'b0;
             perf_store_o = 1'b0;
-            ls_fsm_ns    = IDLE;
+            ls_fsm_ns    = split_misaligned_access ? WAIT_GNT_MIS : WAIT_GNT;
           end else begin
             // TLB Hit. The physical address is valid. Proceed with normal memory request.
             data_req_o   = 1'b1;
@@ -442,6 +453,7 @@ module ibex_load_store_unit #(
         // coverage against such edge cases.
         if (dtlb_fault_d) begin
           // If the TLB faults while waiting for a grant, we must abort.
+          ctrl_update = 1'b1;
           lsu_err_d  = 1'b1;
           data_req_o = 1'b0;
           ls_fsm_ns  = IDLE;
@@ -485,14 +497,17 @@ module ibex_load_store_unit #(
           // TLB miss on the second page. Wait for the PTW to resolve the new page.
           // Suppress the second data request to prevent illegal bus activity.
           data_req_o = 1'b0;
-          
+
           // However, we must continuously monitor for the read data from the first half!
           if (data_rvalid_i || pmp_err_q) begin
             pmp_err_d = data_pmp_err_i;
             lsu_err_d = data_bus_err_i | pmp_err_q;
             rdata_update = ~data_we_q;
-            // The first half is complete, but we must stay in WAIT_RVALID_MIS 
+            // The first half is complete, but we must stay in WAIT_RVALID_MIS
             // to continually retry the second request once the TLB finally hits.
+            // Record that rvalid1 was already consumed so WAIT_RVALID_MIS_GNTS_DONE
+            // knows it holds the final (second) rvalid, not the first.
+            mis_rvalid1_done_d = 1'b1;
           end
         end else begin
           // TLB Hit for the second page. Push out the second memory request.
@@ -503,7 +518,7 @@ module ibex_load_store_unit #(
             pmp_err_d = data_pmp_err_i;
             lsu_err_d = data_bus_err_i | pmp_err_q;
             rdata_update = ~data_we_q;
-            
+
             // If the second request is already granted in the same cycle, finish.
             ls_fsm_ns = data_gnt_i? IDLE : WAIT_GNT;
             addr_update = data_gnt_i & ~(data_bus_err_i | pmp_err_q);
@@ -514,6 +529,9 @@ module ibex_load_store_unit #(
               // But the second request was granted early. Wait for rvalid safely.
               ls_fsm_ns = WAIT_RVALID_MIS_GNTS_DONE;
               handle_misaligned_d = 1'b0;
+              // Do NOT touch mis_rvalid1_done_d here: if it was already set (page-crossing
+              // TLB-miss path) we must preserve it so WAIT_RVALID_MIS_GNTS_DONE knows that
+              // the rvalid it sees is the final one and must fire lsu_resp_valid_o.
             end
           end
         end
@@ -525,6 +543,7 @@ module ibex_load_store_unit #(
 
         if (dtlb_fault_d) begin
           // Fault detected. Abort the pending transaction.
+          ctrl_update = 1'b1;
           data_req_o = 1'b0;
           lsu_err_d  = 1'b1;
           ls_fsm_ns  = IDLE;
@@ -549,7 +568,9 @@ module ibex_load_store_unit #(
         // tell ID/EX stage to update the address (to make sure the
         // second address can be captured correctly for mtval and PMP checking)
         addr_incr_req_o = 1'b1;
-        // Wait for the first rvalid, second request is already granted
+        // Normal path: wait for the first rvalid; second request is already granted.
+        // Page-crossing TLB-miss path (mis_rvalid1_done_q=1): first rvalid was already
+        // consumed in WAIT_RVALID_MIS; this rvalid is the final (second) one.
         if (data_rvalid_i) begin
           // Update the pmp error for the second part
           pmp_err_d = data_pmp_err_i;
@@ -557,15 +578,17 @@ module ibex_load_store_unit #(
           lsu_err_d = data_bus_err_i;
           // Now we can update the address for the second part if no error
           addr_update = ~data_bus_err_i;
-          // Capture the first rdata for loads
+          // Capture rdata for loads
           rdata_update = ~data_we_q;
-          // Wait for second rvalid
+          // Clear the flag on any exit
+          mis_rvalid1_done_d = 1'b0;
           ls_fsm_ns = IDLE;
         end
       end
 
       default: begin
-        ls_fsm_ns = IDLE;
+        ls_fsm_ns          = IDLE;
+        mis_rvalid1_done_d = 1'b0;
       end
     endcase
   end
@@ -580,12 +603,14 @@ module ibex_load_store_unit #(
       pmp_err_q           <= '0;
       lsu_err_q           <= '0;
       dtlb_fault_q        <= '0;
+      mis_rvalid1_done_q  <= '0;
     end else begin
       ls_fsm_cs           <= ls_fsm_ns;
       handle_misaligned_q <= handle_misaligned_d;
       pmp_err_q           <= pmp_err_d;
       lsu_err_q           <= lsu_err_d;
       dtlb_fault_q        <= dtlb_fault_d;
+      mis_rvalid1_done_q  <= mis_rvalid1_done_d;
     end
   end
 
@@ -594,9 +619,18 @@ module ibex_load_store_unit #(
   /////////////
 
   assign data_or_pmp_err    = lsu_err_q | data_bus_err_i | pmp_err_q;
-  assign lsu_resp_valid_o   = (data_rvalid_i | pmp_err_q | dtlb_fault_q) & (ls_fsm_cs == IDLE);
+  // lsu_resp_valid_o fires when the final transaction of an LSU operation completes.
+  // Normally the last rvalid arrives while ls_fsm_cs == IDLE.
+  // Exception: page-crossing misaligned accesses where the first rvalid was already
+  // consumed in WAIT_RVALID_MIS (TLB-miss stall path, mis_rvalid1_done_q=1).  In that
+  // case the second (final) rvalid arrives in WAIT_RVALID_MIS_GNTS_DONE and we must
+  // signal completion there.
+  assign lsu_resp_valid_o   = (data_rvalid_i | pmp_err_q | dtlb_fault_q) &
+                              ((ls_fsm_cs == IDLE) |
+                               (ls_fsm_cs == WAIT_RVALID_MIS_GNTS_DONE & mis_rvalid1_done_q));
   assign lsu_rdata_valid_o  =
-    (ls_fsm_cs == IDLE) & data_rvalid_i & ~data_or_pmp_err & ~data_we_q & ~data_intg_err;
+    ((ls_fsm_cs == IDLE) | (ls_fsm_cs == WAIT_RVALID_MIS_GNTS_DONE & mis_rvalid1_done_q)) &
+    data_rvalid_i & ~data_or_pmp_err & ~data_we_q & ~data_intg_err;
 
   // output to register file
   assign lsu_rdata_o = data_rdata_ext;

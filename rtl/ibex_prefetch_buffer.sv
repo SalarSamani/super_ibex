@@ -30,7 +30,9 @@ module ibex_prefetch_buffer #(
   // TLB
   output logic        itlb_req_o,
   output logic [31:0] itlb_vaddr_o,
+  /* verilator lint_off UNUSEDSIGNAL */
   input  logic [31:0] itlb_paddr_i,
+  /* verilator lint_on UNUSEDSIGNAL */
   input  logic        itlb_hit_i,
   input  logic        itlb_page_fault_i,
   input  logic        ptw_error_i,
@@ -74,6 +76,9 @@ module ibex_prefetch_buffer #(
 
   logic                mmu_fault;
   logic [31:0]         mmu_fault_addr;
+  logic                mmu_fault_q;
+
+  logic                fifo_out_valid;
 
   ////////////////////////////
   // Prefetch buffer status //
@@ -115,7 +120,7 @@ module ibex_prefetch_buffer #(
       .in_rdata_i            ( instr_rdata_i     ),
       .in_err_i              ( instr_err_i       ),
 
-      .out_valid_o           ( valid_o           ),
+      .out_valid_o           ( fifo_out_valid     ),
       .out_ready_i           ( ready_i           ),
       .out_rdata_o           ( rdata_o           ),
       .out_addr_o            ( addr_o            ),
@@ -127,14 +132,19 @@ module ibex_prefetch_buffer #(
   // Requests //
   //////////////
 
-  // Make a new request any time there is space in the FIFO, and space in the request queue
+  // Make a new request any time there is space in the FIFO, and space in the request queue.
+  // Suppress new requests while an MMU fault is latched so we don't keep re-issuing TLB
+  // lookups; mmu_fault_q is cleared when the pipeline issues a branch (pc_set) to the
+  // trap vector after taking the exception.
   assign valid_new_req = req_i & (fifo_ready | branch_i) &
-                         ~rdata_outstanding_q[NUM_REQS-1];
+                         ~rdata_outstanding_q[NUM_REQS-1] & ~mmu_fault_q;
 
   assign valid_req = valid_req_q | valid_new_req;
 
-  // Hold the request stable for requests that didn't get granted
-  assign valid_req_d = valid_req & ~instr_gnt_i;
+  // Hold the request stable for requests that didn't get granted.
+  // Also drain valid_req_q to 0 while an MMU fault is latched so itlb_req_o
+  // stays suppressed until the branch (pc_set) redirects to the trap vector.
+  assign valid_req_d = valid_req & ~instr_gnt_i & ~mmu_fault_q;
 
   // Record whether an outstanding bus request is cancelled by a branch
   assign discard_req_d = valid_req_q & (branch_i | discard_req_q);
@@ -261,11 +271,15 @@ module ibex_prefetch_buffer #(
       discard_req_q        <= 1'b0;
       rdata_outstanding_q  <= 'b0;
       branch_discard_q     <= 'b0;
+      mmu_fault_q          <= 1'b0;
     end else begin
       valid_req_q          <= valid_req_d;
       discard_req_q        <= discard_req_d;
       rdata_outstanding_q  <= rdata_outstanding_s;
       branch_discard_q     <= branch_discard_s;
+      // Clear the latched fault when a branch (pc_set) arrives; the pipeline
+      // redirects to the trap vector so the fault page is no longer being fetched.
+      mmu_fault_q          <= branch_i ? 1'b0 : (mmu_fault_q | mmu_fault);
     end
   end
 
@@ -273,17 +287,34 @@ module ibex_prefetch_buffer #(
   // Outputs //
   /////////////
 
-  assign itlb_req_o    = valid_req;
+  // Suppress the ITLB request on the branch cycle.  On that cycle the FIFO is
+  // being cleared and any translation result would be discarded.  More
+  // importantly, a TLB flush (e.g. SFENCE.VMA) is registered on the same
+  // rising edge, so the TLB still holds stale entries combinationally this
+  // cycle; allowing the lookup would produce a hit against a stale entry for
+  // the post-branch address before the flush takes effect in tlb_mem_q.
+  assign itlb_req_o    = valid_req & ~branch_i & ~mmu_fault_q;
   assign itlb_vaddr_o  = instr_addr_w_aligned;
 
-  assign instr_req_o   = valid_req & itlb_hit_i & ~itlb_page_fault_i & ~ptw_error_i;
+  assign instr_req_o   = valid_req & ~branch_i & itlb_hit_i & ~itlb_page_fault_i & ~ptw_error_i;
+
   assign instr_addr_o  = {itlb_paddr_i[31:2], 2'b00};
 
-  // MMU fault detection: fault occurs when translation is requested but results in fault
-  assign mmu_fault      = valid_req & (~itlb_hit_i | itlb_page_fault_i | ptw_error_i);
+  // MMU fault detection: fault occurs only on a definitive translation error (permission
+  // violation on a TLB hit, or PTW walk failure). A plain TLB miss (~itlb_hit_i) is NOT a
+  // fault — it means the PTW is walking the page table and we should stall (instr_req_o=0)
+  // until the TLB is filled and itlb_hit_i goes high.
+  assign mmu_fault      = valid_req & (itlb_page_fault_i | ptw_error_i);
   assign mmu_fault_addr = instr_addr_w_aligned;
 
-  assign instr_mmu_fault_o      = mmu_fault;
+  assign instr_mmu_fault_o      = mmu_fault_q;
   assign instr_mmu_fault_addr_o = mmu_fault_addr;
+
+  // When an MMU fault is detected the FIFO will never receive rvalid (instr_req_o
+  // is suppressed), so fifo_out_valid stays 0 and the pipeline stalls forever.
+  // Assert valid_o when a fault is latched so the IF stage can latch instr_mmu_fault
+  // and take the instruction page-fault exception.  The fault remains latched until
+  // the pipeline issues a branch (pc_set) to the trap vector.
+  assign valid_o = fifo_out_valid | mmu_fault_q;
 
 endmodule
