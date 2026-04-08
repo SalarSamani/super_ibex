@@ -22,6 +22,10 @@
   `define RegFile ibex_pkg::RegFileFF
 `endif
 
+`ifndef MMUType
+  `define MMUType ibex_pkg::MMUSV32
+`endif
+
 `ifndef INSTR_CYCLE_DELAY
   `define INSTR_CYCLE_DELAY 0
 `endif
@@ -62,6 +66,7 @@ module ibex_simple_system (
   parameter bit                 DbgTriggerEn             = 1'b0;
   parameter bit                 ICacheECC                = 1'b0;
   parameter bit                 BranchPredictor          = 1'b0;
+  parameter ibex_pkg::mmu_type_e MMUType                 = `MMUType;
   parameter                     SRAMInitFile             = "";
 
   logic clk_sys = 1'b0, rst_sys_n;
@@ -219,7 +224,8 @@ module ibex_simple_system (
       .DmBaseAddr      ( 32'h00100000     ),
       .DmAddrMask      ( 32'h00000003     ),
       .DmHaltAddr      ( 32'h00100000     ),
-      .DmExceptionAddr ( 32'h00100000     )
+      .DmExceptionAddr ( 32'h00100000     ),
+      .MMUType         ( MMUType          )
     ) u_top (
       .clk_i                     (clk_sys),
       .rst_ni                    (rst_sys_n),

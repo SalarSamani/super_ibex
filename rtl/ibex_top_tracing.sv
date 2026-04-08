@@ -34,7 +34,9 @@ module ibex_top_tracing import ibex_pkg::*; #(
   parameter int unsigned DmBaseAddr       = 32'h1A110000,
   parameter int unsigned DmAddrMask       = 32'h00000FFF,
   parameter int unsigned DmHaltAddr       = 32'h1A110800,
-  parameter int unsigned DmExceptionAddr  = 32'h1A110808
+  parameter int unsigned DmExceptionAddr  = 32'h1A110808,
+  // MMU implementation type
+  parameter mmu_type_e   MMUType          = MMUSV32
 ) (
   // Clock and Reset
   input  logic                                                         clk_i,
@@ -221,7 +223,8 @@ module ibex_top_tracing import ibex_pkg::*; #(
     .DmBaseAddr       ( DmBaseAddr       ),
     .DmAddrMask       ( DmAddrMask       ),
     .DmHaltAddr       ( DmHaltAddr       ),
-    .DmExceptionAddr  ( DmExceptionAddr  )
+    .DmExceptionAddr  ( DmExceptionAddr  ),
+    .MMUType          ( MMUType          )
   ) u_ibex_top (
     .clk_i,
     .rst_ni,

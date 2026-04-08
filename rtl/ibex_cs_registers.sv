@@ -27,6 +27,7 @@ module ibex_cs_registers import ibex_pkg::*; #(
   parameter bit                     RV32E                       = 0,
   parameter ibex_pkg::rv32m_e RV32M                             = ibex_pkg::RV32MFast,
   parameter ibex_pkg::rv32b_e RV32B                             = ibex_pkg::RV32BNone,
+  parameter ibex_pkg::mmu_type_e    MMUType                     = ibex_pkg::MMUSV32,
   // mvendorid: encoding of manufacturer/provider
   parameter logic [31:0]            CsrMvendorId                = 32'b0,
   // mimpid: encoding of processor implementation version
@@ -77,6 +78,9 @@ module ibex_cs_registers import ibex_pkg::*; #(
   output logic [31:0]          csr_satp_o,
   output logic                 csr_mstatus_sum_o,
   output logic                 csr_mstatus_mxr_o,
+
+  // L1 PTE registers (only used when MMUType == MMUSuperSV32)
+  output logic [31:0]          csr_l1pte_o [16],
 
   // PMP
   output ibex_pkg::pmp_cfg_t     csr_pmp_cfg_o  [PMPNumRegions],
@@ -282,6 +286,16 @@ module ibex_cs_registers import ibex_pkg::*; #(
   logic [31:0] dscratch0_q;
   logic [31:0] dscratch1_q;
   logic        dscratch0_en, dscratch1_en;
+
+  // Custom L1 PTE Registers
+  // Synthesis will automatically optimize these away when MMUType != MMUSuperSV32
+  // as they won't be connected to any registers.
+  /* verilator lint_off UNDRIVEN */
+  logic [31:0] l1pte_q [16];
+  /* verilator lint_on UNDRIVEN */
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [15:0] l1pte_en;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   // CSRs for recoverable NMIs
   // NOTE: these CSRS are nonstandard, see https://github.com/riscv/riscv-isa-manual/issues/261
@@ -699,6 +713,18 @@ module ibex_cs_registers import ibex_pkg::*; #(
         csr_rdata_int = '0;
       end
 
+      // Custom L1 PTE Registers (only for MMUSuperSV32)
+      CSR_L1PTE0,  CSR_L1PTE1,  CSR_L1PTE2,  CSR_L1PTE3,
+      CSR_L1PTE4,  CSR_L1PTE5,  CSR_L1PTE6,  CSR_L1PTE7,
+      CSR_L1PTE8,  CSR_L1PTE9,  CSR_L1PTE10, CSR_L1PTE11,
+      CSR_L1PTE12, CSR_L1PTE13, CSR_L1PTE14, CSR_L1PTE15: begin
+        if (MMUType == MMUSuperSV32) begin
+          csr_rdata_int = l1pte_q[csr_addr_i[3:0]];
+        end else begin
+          illegal_csr = 1'b1;
+        end
+      end 
+
       default: begin
         illegal_csr = 1'b1;
       end
@@ -763,6 +789,14 @@ module ibex_cs_registers import ibex_pkg::*; #(
     depc_en      = 1'b0;
     dscratch0_en = 1'b0;
     dscratch1_en = 1'b0;
+
+    if (MMUType == MMUSV32) begin
+      // No custom L1 PTE registers
+    end else if (MMUType == MMUSuperSV32) begin
+        l1pte_en = 16'b0;
+    end else begin
+      // This case is technically unreachable.
+    end
 
     mstack_en      = 1'b0;
     mstack_d.mpie  = mstatus_q.mpie;
@@ -937,6 +971,15 @@ module ibex_cs_registers import ibex_pkg::*; #(
         CSR_DSCRATCH0: dscratch0_en = 1'b1;
         CSR_DSCRATCH1: dscratch1_en = 1'b1;
 
+          // Custom L1 PTE Registers (only writable for MMUSuperSV32)
+          CSR_L1PTE0, CSR_L1PTE1, CSR_L1PTE2, CSR_L1PTE3,
+          CSR_L1PTE4, CSR_L1PTE5, CSR_L1PTE6, CSR_L1PTE7,
+          CSR_L1PTE8, CSR_L1PTE9, CSR_L1PTE10, CSR_L1PTE11,
+          CSR_L1PTE12, CSR_L1PTE13, CSR_L1PTE14, CSR_L1PTE15: begin
+            if (MMUType == MMUSuperSV32) begin
+                l1pte_en[csr_addr_i[3:0]] = 1'b1;
+            end
+          end
         // machine counter/timers
         CSR_MCOUNTINHIBIT: mcountinhibit_we = 1'b1;
 
@@ -1469,6 +1512,31 @@ module ibex_cs_registers import ibex_pkg::*; #(
     .rd_data_o (dscratch1_q),
     .rd_error_o()
   );
+
+  // Custom L1 PTE Registers — only instantiated for MMUSuperSV32
+  if (MMUType == MMUSuperSV32) begin : g_l1pte_csrs
+    for (genvar i = 0; i < 16; i++) begin : g_l1pte_entry
+      ibex_csr #(
+        .Width     (32),
+        .ShadowCopy(1'b0),
+        .ResetValue('0)
+      ) u_l1pte_csr (
+        .clk_i     (clk_i),
+        .rst_ni    (rst_ni),
+        .wr_data_i (csr_wdata_int),
+        .wr_en_i   (l1pte_en[i]),
+        .rd_data_o (l1pte_q[i]),
+        .rd_error_o()
+      );
+    end
+    // Drive output from live registers
+    assign csr_l1pte_o = l1pte_q;
+  end else begin : g_no_l1pte_csrs
+    // Tie off l1pte output when not using MMUSuperSV32
+    for (genvar i = 0; i < 16; i++) begin : g_l1pte_tieoff
+      assign csr_l1pte_o[i] = '0;
+    end
+  end
 
   // MSTACK
   localparam status_stk_t MSTACK_RESET_VAL = '{mpie: 1'b1, mpp: PRIV_LVL_U};

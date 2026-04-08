@@ -38,7 +38,8 @@ class Config:
         ('PMPGranularity', int),
         ('PMPNumRegions', int),
         ('MHPMCounterNum', int),
-        ('MHPMCounterWidth', int)
+        ('MHPMCounterWidth', int),
+        ('MMUType', str)
     ]
 
     def __init__(self, yml):
@@ -78,6 +79,7 @@ class Config:
         self.pmp_num_regions = Config.read_int('PMPNumRegions', yml)
         self.mhpm_counter_num = Config.read_int('MHPMCounterNum', yml)
         self.mhpm_counter_width = Config.read_int('MHPMCounterWidth', yml)
+        self.mmu_type = Config.read_str('MMUType', yml)
 
     @staticmethod
     def read_bool(fld, yml):

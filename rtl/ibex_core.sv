@@ -52,7 +52,9 @@ module ibex_core import ibex_pkg::*; #(
   // mvendorid: encoding of manufacturer/provider
   parameter logic [31:0]            CsrMvendorId                = 32'b0,
   // marchid: encoding of base microarchitecture
-  parameter logic [31:0]            CsrMimpId                   = 32'b0
+  parameter logic [31:0]            CsrMimpId                   = 32'b0,
+  // MMU implementation type
+  parameter mmu_type_e              MMUType                     = MMUSV32
 ) (
   // Clock and Reset
   input  logic                         clk_i,
@@ -206,7 +208,9 @@ module ibex_core import ibex_pkg::*; #(
   logic        ptw_error;
 
   logic        itlb_write, dtlb_write;
-  tlb_entry_t  ptw_tlb_entry;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [31:0] csr_l1pte [16];
+  /* verilator lint_on UNUSEDSIGNAL */
   logic        illegal_c_insn_id;              // Illegal compressed instruction sent to ID stage
   logic [31:0] pc_if;                          // Program counter in IF stage
   logic [31:0] pc_id;                          // Program counter in ID stage
@@ -829,79 +833,115 @@ module ibex_core import ibex_pkg::*; #(
   logic        lsu_data_rvalid;
   logic        lsu_data_err;
 
+  assign lsu_resp_err = lsu_load_err | lsu_store_err | lsu_load_page_fault | lsu_store_page_fault;
+
   logic        ptw_mem_req;
   logic [31:0] ptw_mem_addr;
   logic        ptw_mem_gnt;
   logic        ptw_mem_rvalid;
   logic        ptw_mem_err;
 
-  logic        ptw_active_q;
-  logic        ptw_req_granted;
-  logic        lsu_in_flight_q, lsu_in_flight_d;
+  if (MMUType == MMUSV32) begin : g_sv32_mmu_lsu
 
-  assign ptw_req_granted = ptw_mem_req & ptw_mem_gnt;
+    logic        ptw_active_q;
+    logic        ptw_req_granted;
+    logic        lsu_in_flight_q, lsu_in_flight_d;
 
-  // PTW active tracking: asserted when a PTW bus transaction is in flight (granted but rvalid
-  // not yet received), so that rvalid and grant signals can be correctly routed to the PTW
-  // rather than the LSU.
-  //
-  // Case 1: grant & rvalid same cycle (zero-latency) : stay 0; transaction completes instantly
-  // Case 2: grant only                               : set 1; response still pending
-  // Case 3: rvalid while active                      : clear 0; response received
-  // Default: hold previous state
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) ptw_active_q <= 1'b0;
-    else         ptw_active_q <= (ptw_req_granted & data_rvalid_i) ? 1'b0 :
-                                 ptw_req_granted ? 1'b1 :
-                                 (ptw_active_q & data_rvalid_i) ? 1'b0 :
-                                 ptw_active_q;
+    assign ptw_req_granted = ptw_mem_req & ptw_mem_gnt;
+
+    // PTW active tracking
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) ptw_active_q <= 1'b0;
+      else         ptw_active_q <= (ptw_req_granted & data_rvalid_i) ? 1'b0 :
+                                   ptw_req_granted ? 1'b1 :
+                                   (ptw_active_q & data_rvalid_i) ? 1'b0 :
+                                   ptw_active_q;
+    end
+
+    // LSU in-flight tracking
+    assign lsu_in_flight_d = (lsu_data_req & data_gnt_i & data_rvalid_i) ? 1'b0 :
+                             (lsu_data_req & data_gnt_i) ? 1'b1 :
+                             (data_rvalid_i & ~ptw_active_q) ? 1'b0 :
+                             lsu_in_flight_q;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) lsu_in_flight_q <= 1'b0;
+      else         lsu_in_flight_q <= lsu_in_flight_d;
+    end
+
+    logic ptw_sel;
+    assign ptw_sel = ptw_active_q | (ptw_mem_req & ~lsu_data_req & ~lsu_in_flight_q);
+
+    assign data_req_out = lsu_data_req | ptw_mem_req;
+
+    assign data_req_o   = ptw_sel ? ptw_mem_req  : (lsu_data_req & ~pmp_req_err[PMP_D]);
+    assign data_addr_o  = ptw_sel ? ptw_mem_addr : lsu_data_addr;
+    assign data_we_o    = ptw_sel ? 1'b0         : lsu_data_we;
+    assign data_be_o    = ptw_sel ? 4'b1111      : lsu_data_be;
+    assign data_wdata_o = ptw_sel ? 32'b0        : lsu_data_wdata;
+
+    assign lsu_data_gnt    = data_gnt_i & ~ptw_sel;
+    assign ptw_mem_gnt     = data_gnt_i & ptw_sel;
+
+    assign lsu_data_rvalid = data_rvalid_i & ~ptw_active_q;
+    assign ptw_mem_rvalid  = data_rvalid_i & ptw_active_q;
+
+    assign lsu_data_err    = data_err_i & ~ptw_active_q;
+    assign ptw_mem_err     = data_err_i & ptw_active_q;
+
+  end else begin : g_super_sv32_mmu_lsu
+
+    logic        ptw_active_q;
+    logic        ptw_req_granted;
+    logic        lsu_in_flight_q, lsu_in_flight_d;
+
+    assign ptw_req_granted = ptw_mem_req & ptw_mem_gnt;
+
+    // PTW active tracking
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) ptw_active_q <= 1'b0;
+      else         ptw_active_q <= (ptw_req_granted & data_rvalid_i) ? 1'b0 :
+                                   ptw_req_granted ? 1'b1 :
+                                   (ptw_active_q & data_rvalid_i) ? 1'b0 :
+                                   ptw_active_q;
+    end
+
+    // LSU in-flight tracking
+    assign lsu_in_flight_d = (lsu_data_req & data_gnt_i & data_rvalid_i) ? 1'b0 :
+                             (lsu_data_req & data_gnt_i) ? 1'b1 :
+                             (data_rvalid_i & ~ptw_active_q) ? 1'b0 :
+                             lsu_in_flight_q;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) lsu_in_flight_q <= 1'b0;
+      else         lsu_in_flight_q <= lsu_in_flight_d;
+    end
+
+    logic ptw_sel;
+    assign ptw_sel = ptw_active_q | (ptw_mem_req & ~lsu_data_req & ~lsu_in_flight_q);
+
+    assign data_req_out = lsu_data_req | ptw_mem_req;
+
+    assign data_req_o   = ptw_sel ? ptw_mem_req  : (lsu_data_req & ~pmp_req_err[PMP_D]);
+    assign data_addr_o  = ptw_sel ? ptw_mem_addr : lsu_data_addr;
+    assign data_we_o    = ptw_sel ? 1'b0         : lsu_data_we;
+    assign data_be_o    = ptw_sel ? 4'b1111      : lsu_data_be;
+    assign data_wdata_o = ptw_sel ? 32'b0        : lsu_data_wdata;
+
+    assign lsu_data_gnt    = data_gnt_i & ~ptw_sel;
+    assign ptw_mem_gnt     = data_gnt_i & ptw_sel;
+
+    assign lsu_data_rvalid = data_rvalid_i & ~ptw_active_q;
+    assign ptw_mem_rvalid  = data_rvalid_i & ptw_active_q;
+
+    assign lsu_data_err    = data_err_i & ~ptw_active_q;
+    assign ptw_mem_err     = data_err_i & ptw_active_q;
+
   end
 
-  // LSU in-flight tracking (OBI request/response):
-  //
-  // Case 1: req & gnt & rvalid (same cycle)
-  //   zero-latency transaction: starts and completes in one cycle : clear in-flight = 0
-  //
-  // Case 2: req & gnt (no rvalid yet)
-  //   new transaction issued : set in-flight = 1
-  //
-  // Case 3: rvalid & ~ptw_active_q
-  //   response for LSU arrives : clear in-flight = 0
-  //
-  // Default:
-  //   no event : hold previous state
-  //
-  assign lsu_in_flight_d = (lsu_data_req & data_gnt_i & data_rvalid_i) ? 1'b0 :
-                           (lsu_data_req & data_gnt_i) ? 1'b1 :
-                           (data_rvalid_i & ~ptw_active_q) ? 1'b0 :
-                           lsu_in_flight_q;
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) lsu_in_flight_q <= 1'b0;
-    else         lsu_in_flight_q <= lsu_in_flight_d;
-  end
-
-  logic ptw_sel;
-  assign ptw_sel = ptw_active_q | (ptw_mem_req & ~lsu_data_req & ~lsu_in_flight_q);
-
-  assign data_req_out = lsu_data_req | ptw_mem_req; // For PMP checking
-  assign data_req_o   = ptw_sel ? ptw_mem_req : (lsu_data_req & ~pmp_req_err[PMP_D]);
-  assign data_addr_o  = ptw_sel ? ptw_mem_addr : lsu_data_addr;
-  assign data_we_o    = ptw_sel ? 1'b0         : lsu_data_we;
-  assign data_be_o    = ptw_sel ? 4'b1111      : lsu_data_be;
-  assign data_wdata_o = ptw_sel ? 32'b0        : lsu_data_wdata;
-
-  assign lsu_data_gnt    = data_gnt_i & ~ptw_sel;
-  assign ptw_mem_gnt     = data_gnt_i & ptw_sel;
-  
-  assign lsu_data_rvalid = data_rvalid_i & ~ptw_active_q;
-  assign ptw_mem_rvalid  = data_rvalid_i & ptw_active_q;
-  
-  assign lsu_data_err    = data_err_i & ~ptw_active_q;
-  assign ptw_mem_err     = data_err_i & ptw_active_q;
-
-  assign lsu_resp_err = lsu_load_err | lsu_store_err | lsu_load_page_fault | lsu_store_page_fault;
-
+  // Load Store Unit — shared by both MMU types.
+  // The LSU connects to the TLB signals which are driven by the selected MMU generate block.
+  // For MMUSuperSV32, the LSU will eventually be replaced with a different implementation.
   ibex_load_store_unit #(
     .MemECC(MemECC),
     .MemDataWidth(MemDataWidth)
@@ -1214,6 +1254,7 @@ module ibex_core import ibex_pkg::*; #(
     .RV32E            (RV32E),
     .RV32M            (RV32M),
     .RV32B            (RV32B),
+    .MMUType          (MMUType),
     .CsrMvendorId     (CsrMvendorId),
     .CsrMimpId        (CsrMimpId)
   ) cs_registers_i (
@@ -1254,6 +1295,7 @@ module ibex_core import ibex_pkg::*; #(
     .csr_satp_o       (csr_satp),
     .csr_mstatus_sum_o(csr_mstatus_sum),
     .csr_mstatus_mxr_o(csr_mstatus_mxr),
+    .csr_l1pte_o      (csr_l1pte),
     .csr_mstatus_tw_o (csr_mstatus_tw),
     .csr_mepc_o       (csr_mepc),
     .csr_mtval_o      (crash_dump_mtval),
@@ -1381,82 +1423,173 @@ module ibex_core import ibex_pkg::*; #(
     assign pmp_req_err[PMP_D]  = 1'b0;
   end
 
-  // Instruction TLB
-  ibex_tlb #(
-    .TLB_ENTRIES(4)
-  ) itlb_i (
-    .clk_i            (clk_i),
-    .rst_ni           (rst_ni),
+  // TLB and PTW — only for MMUSV32. MMUSuperSV32 will have its own TLB/PTW.
+  if (MMUType == MMUSV32) begin : g_sv32_mmu_tlb_ptw
 
-    .req_i            (itlb_req),
-    .vaddr_i          (itlb_vaddr),
-    .priv_lvl_i       (priv_mode_id),
-    .mstatus_sum_i    (csr_mstatus_sum),
-    .mstatus_mxr_i    (csr_mstatus_mxr),
-    .is_instruction_i (1'b1),
-    .is_store_i       (1'b0),
+    tlb_entry_t ptw_tlb_entry;
 
-    .paddr_o          (itlb_paddr),
-    .hit_o            (itlb_hit),
-    .page_fault_o     (itlb_page_fault),
+    // Instruction TLB
+    ibex_tlb #(
+      .TLB_ENTRIES(4)
+    ) itlb_i (
+      .clk_i            (clk_i),
+      .rst_ni           (rst_ni),
 
-    .flush_i          (tlb_flush),
-    .csr_satp_i       (csr_satp),
+      .req_i            (itlb_req),
+      .vaddr_i          (itlb_vaddr),
+      .priv_lvl_i       (priv_mode_id),
+      .mstatus_sum_i    (csr_mstatus_sum),
+      .mstatus_mxr_i    (csr_mstatus_mxr),
+      .is_instruction_i (1'b1),
+      .is_store_i       (1'b0),
 
-    .ptw_write_i      (itlb_write),
-    .ptw_entry_i      (ptw_tlb_entry)
-  );
+      .paddr_o          (itlb_paddr),
+      .hit_o            (itlb_hit),
+      .page_fault_o     (itlb_page_fault),
 
-  // Data TLB
-  ibex_tlb #(
-    .TLB_ENTRIES(4)
-  ) dtlb_i (
-    .clk_i            (clk_i),
-    .rst_ni           (rst_ni),
+      .flush_i          (tlb_flush),
+      .csr_satp_i       (csr_satp),
 
-    .req_i            (dtlb_req),
-    .vaddr_i          (dtlb_vaddr),
-    .priv_lvl_i       (priv_mode_lsu),
-    .mstatus_sum_i    (csr_mstatus_sum),
-    .mstatus_mxr_i    (csr_mstatus_mxr),
-    .is_instruction_i (1'b0),
-    .is_store_i       (lsu_data_we),
+      .ptw_write_i      (itlb_write),
+      .ptw_entry_i      (ptw_tlb_entry)
+    );
 
-    .paddr_o          (dtlb_paddr),
-    .hit_o            (dtlb_hit),
-    .page_fault_o     (dtlb_page_fault),
+    // Data TLB
+    ibex_tlb #(
+      .TLB_ENTRIES(4)
+    ) dtlb_i (
+      .clk_i            (clk_i),
+      .rst_ni           (rst_ni),
 
-    .flush_i          (tlb_flush),
-    .csr_satp_i       (csr_satp),
+      .req_i            (dtlb_req),
+      .vaddr_i          (dtlb_vaddr),
+      .priv_lvl_i       (priv_mode_lsu),
+      .mstatus_sum_i    (csr_mstatus_sum),
+      .mstatus_mxr_i    (csr_mstatus_mxr),
+      .is_instruction_i (1'b0),
+      .is_store_i       (lsu_data_we),
 
-    .ptw_write_i      (dtlb_write),
-    .ptw_entry_i      (ptw_tlb_entry)
-  );
+      .paddr_o          (dtlb_paddr),
+      .hit_o            (dtlb_hit),
+      .page_fault_o     (dtlb_page_fault),
 
-  // Page Table Walker
-  ibex_ptw ptw_i (
-    .clk_i            (clk_i),
-    .rst_ni           (rst_ni),
+      .flush_i          (tlb_flush),
+      .csr_satp_i       (csr_satp),
 
-    .itlb_req_i       (itlb_req & ~itlb_hit & ~itlb_page_fault),
-    .itlb_vaddr_i     (itlb_vaddr),
-    .dtlb_req_i       (dtlb_req & ~dtlb_hit & ~dtlb_page_fault),
-    .dtlb_vaddr_i     (dtlb_vaddr),
+      .ptw_write_i      (dtlb_write),
+      .ptw_entry_i      (ptw_tlb_entry)
+    );
 
-    .itlb_write_o     (itlb_write),
-    .dtlb_write_o     (dtlb_write),
-    .tlb_entry_o      (ptw_tlb_entry),
-    .ptw_error_o      (ptw_error),
+    // Page Table Walker
+    ibex_ptw ptw_i (
+      .clk_i            (clk_i),
+      .rst_ni           (rst_ni),
 
-    .ptw_mem_req_o    (ptw_mem_req),
-    .ptw_mem_addr_o   (ptw_mem_addr),
-    .ptw_mem_gnt_i    (ptw_mem_gnt),
-    .ptw_mem_rvalid_i (ptw_mem_rvalid),
-    .ptw_mem_rdata_i  (data_rdata_i),
-    .ptw_mem_err_i    (ptw_mem_err),
+      .itlb_req_i       (itlb_req & ~itlb_hit & ~itlb_page_fault),
+      .itlb_vaddr_i     (itlb_vaddr),
+      .dtlb_req_i       (dtlb_req & ~dtlb_hit & ~dtlb_page_fault),
+      .dtlb_vaddr_i     (dtlb_vaddr),
 
-    .satp_i           (csr_satp)
-  );
+      .itlb_write_o     (itlb_write),
+      .dtlb_write_o     (dtlb_write),
+      .tlb_entry_o      (ptw_tlb_entry),
+      .ptw_error_o      (ptw_error),
+
+      .ptw_mem_req_o    (ptw_mem_req),
+      .ptw_mem_addr_o   (ptw_mem_addr),
+      .ptw_mem_gnt_i    (ptw_mem_gnt),
+      .ptw_mem_rvalid_i (ptw_mem_rvalid),
+      .ptw_mem_rdata_i  (data_rdata_i),
+      .ptw_mem_err_i    (ptw_mem_err),
+
+      .satp_i           (csr_satp)
+    );
+
+  end else begin : g_super_sv32_mmu_tlb_ptw
+
+    // Super MMU uses its own entry type for PTW↔TLB communication
+    super_tlb_entry_t super_ptw_tlb_entry;
+
+    // Instruction TLB (Super MMU)
+    ibex_super_tlb #(
+      .TLB_ENTRIES(4)
+    ) itlb_i (
+      .clk_i            (clk_i),
+      .rst_ni           (rst_ni),
+
+      .req_i            (itlb_req),
+      .vaddr_i          (itlb_vaddr),
+      .priv_lvl_i       (priv_mode_id),
+      .mstatus_sum_i    (csr_mstatus_sum),
+      .mstatus_mxr_i    (csr_mstatus_mxr),
+      .is_instruction_i (1'b1),
+      .is_store_i       (1'b0),
+
+      .paddr_o          (itlb_paddr),
+      .hit_o            (itlb_hit),
+      .page_fault_o     (itlb_page_fault),
+
+      .flush_i          (tlb_flush),
+      .csr_satp_i       (csr_satp),
+
+      .ptw_write_i      (itlb_write),
+      .ptw_entry_i      (super_ptw_tlb_entry)
+    );
+
+    // Data TLB (Super MMU)
+    ibex_super_tlb #(
+      .TLB_ENTRIES(4)
+    ) dtlb_i (
+      .clk_i            (clk_i),
+      .rst_ni           (rst_ni),
+
+      .req_i            (dtlb_req),
+      .vaddr_i          (dtlb_vaddr),
+      .priv_lvl_i       (priv_mode_lsu),
+      .mstatus_sum_i    (csr_mstatus_sum),
+      .mstatus_mxr_i    (csr_mstatus_mxr),
+      .is_instruction_i (1'b0),
+      .is_store_i       (lsu_data_we),
+
+      .paddr_o          (dtlb_paddr),
+      .hit_o            (dtlb_hit),
+      .page_fault_o     (dtlb_page_fault),
+
+      .flush_i          (tlb_flush),
+      .csr_satp_i       (csr_satp),
+
+      .ptw_write_i      (dtlb_write),
+      .ptw_entry_i      (super_ptw_tlb_entry)
+    );
+
+    // Page Table Walker (Super MMU)
+    ibex_super_ptw ptw_i (
+      .clk_i            (clk_i),
+      .rst_ni           (rst_ni),
+
+      .itlb_req_i       (itlb_req & ~itlb_hit & ~itlb_page_fault),
+      .itlb_vaddr_i     (itlb_vaddr),
+      .dtlb_req_i       (dtlb_req & ~dtlb_hit & ~dtlb_page_fault),
+      .dtlb_vaddr_i     (dtlb_vaddr),
+
+      .l1pte_i          (csr_l1pte),
+
+      .itlb_write_o     (itlb_write),
+      .dtlb_write_o     (dtlb_write),
+      .tlb_entry_o      (super_ptw_tlb_entry),
+      .ptw_error_o      (ptw_error),
+
+      .ptw_mem_req_o    (ptw_mem_req),
+      .ptw_mem_addr_o   (ptw_mem_addr),
+      .ptw_mem_gnt_i    (ptw_mem_gnt),
+      .ptw_mem_rvalid_i (ptw_mem_rvalid),
+      .ptw_mem_rdata_i  (data_rdata_i),
+      .ptw_mem_err_i    (ptw_mem_err),
+
+      .satp_i           (csr_satp)
+    );
+
+  end
 
 `ifdef RVFI
   // When writeback stage is present RVFI information is emitted when instruction is finished in

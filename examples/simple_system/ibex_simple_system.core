@@ -132,6 +132,12 @@ parameters:
     default: 40
     description: Bit width of performance monitor event counters [32/64]
 
+  MMUType:
+    datatype: str
+    default: ibex_pkg::MMUSV32
+    paramtype: vlogdefine
+    description: "MMU implementation type. See the ibex_pkg::mmu_type_e enum in ibex_pkg.sv for permitted values."
+
 targets:
   default: &default_target
     filesets:
@@ -157,6 +163,7 @@ targets:
       - PMPNumRegions
       - MHPMCounterNum
       - MHPMCounterWidth
+      - MMUType
       - SRAMInitFile
 
   lint:

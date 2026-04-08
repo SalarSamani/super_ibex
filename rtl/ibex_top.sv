@@ -56,7 +56,9 @@ module ibex_top import ibex_pkg::*; #(
   // 0 indicates this field is not implemented. Ibex implementers may wish to indicate an
   // RTL/netlist version here using their own unique encoding (e.g. 32 bits of the git hash of the
   // implemented commit).
-  parameter logic [31:0]            CsrMimpId                    = 32'b0
+  parameter logic [31:0]            CsrMimpId                    = 32'b0,
+  // MMU implementation type
+  parameter mmu_type_e              MMUType                      = MMUSV32
 ) (
   // Clock and Reset
   input  logic                                                         clk_i,
@@ -344,7 +346,8 @@ module ibex_top import ibex_pkg::*; #(
     .DmHaltAddr       (DmHaltAddr),
     .DmExceptionAddr  (DmExceptionAddr),
     .CsrMvendorId     (CsrMvendorId),
-    .CsrMimpId        (CsrMimpId)
+    .CsrMimpId        (CsrMimpId),
+    .MMUType          (MMUType)
   ) u_ibex_core (
     .clk_i(clk),
     .rst_ni,
@@ -1025,7 +1028,8 @@ module ibex_top import ibex_pkg::*; #(
       .DmHaltAddr          (DmHaltAddr),
       .DmExceptionAddr     (DmExceptionAddr),
       .CsrMvendorId        (CsrMvendorId),
-      .CsrMimpId           (CsrMimpId)
+      .CsrMimpId           (CsrMimpId),
+      .MMUType             (MMUType)
     ) u_ibex_lockstep (
       .clk_i                    (clk),
       .rst_ni                   (rst_ni),

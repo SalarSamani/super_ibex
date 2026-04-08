@@ -18,6 +18,7 @@ filesets:
     files:
       - rtl/ibex_alu.sv
       - rtl/ibex_tlb.sv
+      - rtl/ibex_super_tlb.sv
       - rtl/ibex_branch_predict.sv
       - rtl/ibex_compressed_decoder.sv
       - rtl/ibex_controller.sv
@@ -35,6 +36,7 @@ filesets:
       - rtl/ibex_prefetch_buffer.sv
       - rtl/ibex_pmp.sv
       - rtl/ibex_ptw.sv
+      - rtl/ibex_super_ptw.sv
       - rtl/ibex_wb_stage.sv
       - rtl/ibex_dummy_instr.sv
       - rtl/ibex_core.sv

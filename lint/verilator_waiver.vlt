@@ -75,5 +75,16 @@ lint_off -rule MULTIDRIVEN -file "*/rtl/ibex_tracer.sv" -match "*data_accessed*"
 // https://github.com/lowRISC/opentitan/issues/2313
 lint_off -file "*/lowrisc_prim_*/rtl/*.sv"
 
+// The PTW mem_req/mem_gnt signals form a combinational loop through the bus
+// arbiter (req -> gnt -> req). The loop is functionally safe because mem_req
+// is set unconditionally in the REQ states before checking mem_gnt, so the
+// output does not actually depend on the input within the same cycle.
+lint_off -rule UNOPTFLAT -file "*/rtl/ibex_core.sv" -match "*ptw_mem_gnt*"
+
+// Debug-only $display blocks in super TLB/PTW use rst_ni synchronously
+// as a guard condition. This is simulation-only code (translate_off).
+lint_off -rule SYNCASYNCNET -file "*/rtl/ibex_super_tlb.sv"
+lint_off -rule SYNCASYNCNET -file "*/rtl/ibex_super_ptw.sv"
+
 lint_off -rule UNUSED -file "*/rtl/ibex_top_tracing.sv" -match "*RndCnstLfsrSeed*"
 lint_off -rule UNUSED -file "*/rtl/ibex_top_tracing.sv" -match "*RndCnstLfsrPerm*"

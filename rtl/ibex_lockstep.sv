@@ -50,7 +50,9 @@ module ibex_lockstep import ibex_pkg::*; #(
   // mvendorid: encoding of manufacturer/provider
   parameter logic [31:0]            CsrMvendorId                = 32'b0,
   // marchid: encoding of base microarchitecture
-  parameter logic [31:0]            CsrMimpId                   = 32'b0
+  parameter logic [31:0]            CsrMimpId                   = 32'b0,
+  // MMU implementation type
+  parameter ibex_pkg::mmu_type_e    MMUType                     = ibex_pkg::MMUSV32
 ) (
   input  logic                         clk_i,
   input  logic                         rst_ni,
@@ -451,7 +453,8 @@ module ibex_lockstep import ibex_pkg::*; #(
     .DmHaltAddr        ( DmHaltAddr           ),
     .DmExceptionAddr   ( DmExceptionAddr      ),
     .CsrMvendorId      ( CsrMvendorId         ),
-    .CsrMimpId         ( CsrMimpId            )
+    .CsrMimpId         ( CsrMimpId            ),
+    .MMUType           ( MMUType              )
   ) u_shadow_core (
     .clk_i               (clk_i),
     .rst_ni              (rst_shadow_n),

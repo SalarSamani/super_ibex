@@ -59,6 +59,12 @@ package ibex_pkg;
     RV32ZcaZcbZcmp = 3
   } rv32zc_e;
 
+  // MMU implementation selection
+  typedef enum integer {
+    MMUSV32      = 0,
+    MMUSuperSV32 = 1
+  } mmu_type_e;
+
   /////////////
   // Opcodes //
   /////////////
@@ -645,10 +651,28 @@ package ibex_pkg;
     CSR_MHPMCOUNTER30H = 12'hB9E,
     CSR_MHPMCOUNTER31H = 12'hB9F,
     CSR_CPUCTRLSTS     = 12'h7C0,
-    CSR_SECURESEED     = 12'h7C1
+    CSR_SECURESEED     = 12'h7C1,
+
+    // Custom L1 PTE Registers
+    CSR_L1PTE0         = 12'h3C0,
+    CSR_L1PTE1         = 12'h3C1,
+    CSR_L1PTE2         = 12'h3C2,
+    CSR_L1PTE3         = 12'h3C3,
+    CSR_L1PTE4         = 12'h3C4,
+    CSR_L1PTE5         = 12'h3C5,
+    CSR_L1PTE6         = 12'h3C6,
+    CSR_L1PTE7         = 12'h3C7,
+    CSR_L1PTE8         = 12'h3C8,
+    CSR_L1PTE9         = 12'h3C9,
+    CSR_L1PTE10        = 12'h3CA,
+    CSR_L1PTE11        = 12'h3CB,
+    CSR_L1PTE12        = 12'h3CC,
+    CSR_L1PTE13        = 12'h3CD,
+    CSR_L1PTE14        = 12'h3CE,
+    CSR_L1PTE15        = 12'h3CF
   } csr_num_e;
 
-  // TLB Entry Format
+  // TLB Entry Format (standard Sv32)
   typedef struct packed {
     logic [19:0] vpn;
     logic [21:0] ppn;
@@ -660,6 +684,21 @@ package ibex_pkg;
     logic        r;
     logic        v;
   } tlb_entry_t;
+
+  // Super MMU TLB Entry Format
+  typedef struct packed {
+    logic [11:0] tag;        // {lin[7:0], selected_exp[3:0]}
+    logic [1:0]  page_sz;    // 00=256B, 01=4KB, 10=64KB, 11=1MB
+    logic [23:0] phys_page;  // full leaf PTE[31:8]
+    logic        d;
+    logic        a;
+    logic        g;
+    logic        u;
+    logic        x;
+    logic        w;
+    logic        r;
+    logic        v;
+  } super_tlb_entry_t;
 
   // Sv32 Page Table Entry "PTE" Format
   typedef struct packed {
