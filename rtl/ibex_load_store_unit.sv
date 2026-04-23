@@ -410,7 +410,11 @@ module ibex_load_store_unit #(
             // ctrl_update must be set so data_we_q captures the current lsu_we_i;
             // without it, data_we_q retains the previous transaction's value and
             // load_page_fault_o / store_page_fault_o are mis-reported.
+            // addr_update must also be set so addr_last_q (stval) captures
+            // the faulting VA — otherwise stval retains the last granted
+            // access's address (e.g. stale S-mode store before sret).
             ctrl_update  = 1'b1;
+            addr_update  = 1'b1;
             lsu_err_d    = 1'b1;
             data_req_o   = 1'b0;
             perf_load_o  = 1'b0;
@@ -453,7 +457,9 @@ module ibex_load_store_unit #(
         // coverage against such edge cases.
         if (dtlb_fault_d) begin
           // If the TLB faults while waiting for a grant, we must abort.
+          // addr_update captures the faulting VA into addr_last_q (stval).
           ctrl_update = 1'b1;
+          addr_update = 1'b1;
           lsu_err_d  = 1'b1;
           data_req_o = 1'b0;
           ls_fsm_ns  = IDLE;
@@ -543,7 +549,10 @@ module ibex_load_store_unit #(
 
         if (dtlb_fault_d) begin
           // Fault detected. Abort the pending transaction.
+          // addr_update must also be set so addr_last_q (stval) captures the
+          // faulting VA — otherwise it retains the last granted access's address.
           ctrl_update = 1'b1;
+          addr_update = 1'b1;
           data_req_o = 1'b0;
           lsu_err_d  = 1'b1;
           ls_fsm_ns  = IDLE;
