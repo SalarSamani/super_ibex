@@ -10,6 +10,11 @@ int putchar(int c) {
   return c;
 }
 
+int getchar(void) {
+  int c = DEV_READ(SIM_CTRL_BASE + SIM_CTRL_IN, 0) & 0xFF;
+  return (c == 0xFF) ? -1 : c;
+}
+
 int puts(const char *str) {
   while (*str) {
     putchar(*str++);

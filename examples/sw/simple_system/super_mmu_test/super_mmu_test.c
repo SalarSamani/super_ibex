@@ -91,8 +91,9 @@ extern char _umode_t09_lma[];
 extern char _smode_text_start[];
 extern char _smode_text_end[];
 
-// Super MMU tables: 16 entries * 4 bytes = 64 bytes each, 256B aligned
-static uint32_t lin0_table[16] __attribute__((aligned(256)));
+// Super MMU tables, 256B aligned.
+// L2 table: 64 entries indexed by {pg_code, lin0}; exp tables: 16 entries.
+static uint32_t lin0_table[64] __attribute__((aligned(256)));
 static uint32_t exp_table_0[16] __attribute__((aligned(256)));
 static uint32_t exp_table_1[16] __attribute__((aligned(256)));
 
@@ -100,9 +101,9 @@ static uint32_t exp_table_1[16] __attribute__((aligned(256)));
 extern void smode_entry(void);
 extern void m_trap_handler(void);
 
-// Write to CSR L1PTE0 (address 0x3C0)
+// Write to CSR L1PTE0 (address 0x5C0)
 static inline void write_l1pte0(uint32_t val) {
-    asm volatile("csrw 0x3C0, %0" :: "r"(val));
+    asm volatile("csrw 0x5C0, %0" :: "r"(val));
 }
 
 // Build a leaf PTE for a 4KB page.
@@ -122,8 +123,10 @@ static uint32_t make_ptr(uint32_t table_addr) {
 static void mmu_init(void) {
     uint32_t i;
 
+    for (i = 0; i < 64; i++) {
+        lin0_table[i] = 0;
+    }
     for (i = 0; i < 16; i++) {
-        lin0_table[i]  = 0;
         exp_table_0[i] = 0;
         exp_table_1[i] = 0;
     }
@@ -186,11 +189,12 @@ static void mmu_init(void) {
     // VA 0x01005000 -> umode_t09 (U RWXA)
     exp_table_1[5] = make_4kb_leaf((uint32_t)_umode_t09_lma, PTE_U_LEAF);
 
-    // Wire up the table hierarchy:
-    // lin0_table[0] -> exp_table_0 (pointer PTE)
-    lin0_table[0] = make_ptr((uint32_t)exp_table_0);
-    // lin0_table[1] -> exp_table_1 (pointer PTE)
-    lin0_table[1] = make_ptr((uint32_t)exp_table_1);
+    // Wire up the table hierarchy. L2 index = {pg_code, lin0}; all test
+    // pages are 4KB (pg_code=1), so entries live at [16 + lin0].
+    // lin0_table[16+0] -> exp_table_0 (pointer PTE)
+    lin0_table[16 + 0] = make_ptr((uint32_t)exp_table_0);
+    // lin0_table[16+1] -> exp_table_1 (pointer PTE)
+    lin0_table[16 + 1] = make_ptr((uint32_t)exp_table_1);
 
     // L1PTE[0] CSR -> lin0_table (pointer PTE)
     write_l1pte0(make_ptr((uint32_t)lin0_table));

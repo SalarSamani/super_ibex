@@ -5,7 +5,7 @@
 // Super MMU PTW using super_tlb_entry_t:
 // - Level 1 "root" is 16 CSR registers (l1pte_i[0..15]), indexed by lin1 (VA[31:28])
 // - Level 2 is a 16-entry table in memory, indexed by lin0 (VA[27:24])
-// - Level 3 is a 16-entry table in memory, indexed by exp_sel (exp3/2/1/0 per page-size rule)
+// - Level 3 is a 16-entry table in memory, indexed by exp_vpn (exp3/2/1/0 per page-size rule)
 // - Each PTE is 32 bits: [31:8] address/base field, [7:0] flags (V,R,W,X,U,G,A,D)
 
 module ibex_super_ptw import ibex_pkg::*; (
@@ -57,7 +57,7 @@ module ibex_super_ptw import ibex_pkg::*; (
   localparam int PTE_D = 7;
 
   // VA decoding helpers
-  function automatic logic [1:0] super_pg_code(input logic [31:0] va);
+  function automatic logic [1:0] exp_page_size(input logic [31:0] va);
     logic unused_va;
     unused_va = ^{va[31:24], va[11:0]};
     if (va[23:20] != 4'h0) begin
@@ -71,7 +71,7 @@ module ibex_super_ptw import ibex_pkg::*; (
     end
   endfunction
 
-  function automatic logic [3:0] super_exp_sel(input logic [31:0] va, input logic [1:0] pg_code);
+  function automatic logic [3:0] exp_vpn(input logic [31:0] va, input logic [1:0] pg_code);
     logic unused_va;
     unused_va = ^{va[31:24], va[7:0]};
     unique case (pg_code)
@@ -85,7 +85,7 @@ module ibex_super_ptw import ibex_pkg::*; (
   function automatic logic [11:0] super_tag12(input logic [31:0] va, input logic [1:0] pg_code);
     logic unused_va;
     unused_va = ^{va[7:0]};
-    return {va[31:24], super_exp_sel(va, pg_code)};
+    return {va[31:24], exp_vpn(va, pg_code)};
   endfunction
 
   // PTE validation helpers
@@ -94,9 +94,7 @@ module ibex_super_ptw import ibex_pkg::*; (
   endfunction
 
   function automatic logic pte_is_bad_pointer(input logic [31:0] pte);
-    return (!pte[PTE_V]) ||
-           pte_has_reserved_rw(pte) ||
-           pte[PTE_R] || pte[PTE_W] || pte[PTE_X];
+    return (!pte[PTE_V]);
   endfunction
 
   function automatic logic pte_is_bad_leaf(input logic [31:0] pte);
@@ -105,10 +103,16 @@ module ibex_super_ptw import ibex_pkg::*; (
            (!pte[PTE_R] && !pte[PTE_X]);
   endfunction
 
-  function automatic logic [31:0] pte_base_addr(input logic [31:0] pte);
+  function automatic logic [31:0] pte_base_addr_256(input logic [31:0] pte);
     logic unused_pte;
     unused_pte = ^{pte[7:0]};
     return {pte[31:8], 8'h00};
+  endfunction
+
+  function automatic logic [31:0] pte_base_addr_64(input logic [31:0] pte);
+    logic unused_pte;
+    unused_pte = ^{pte[5:0]};
+    return {pte[31:6], 6'h00};
   endfunction
 
   // FSM states
@@ -124,16 +128,16 @@ module ibex_super_ptw import ibex_pkg::*; (
   ptw_state_e   state_q, state_d;
   logic         servicing_itlb_q, servicing_itlb_d;
   logic [31:0]  active_vaddr_q, active_vaddr_d;
-  logic [31:0]  l3_base_addr_q, l3_base_addr_d;
+  logic [31:0]  exp_page_base_q, exp_page_base_d;
 
   // Decoded fields from active_vaddr_q
   logic [1:0]  pg_code;
-  logic [3:0]  exp_sel;
+  logic [3:0]  exp_vpn_part;
   logic [3:0]  lin1;
   logic [3:0]  lin0;
 
-  assign pg_code = super_pg_code(active_vaddr_q);
-  assign exp_sel = super_exp_sel(active_vaddr_q, pg_code);
+  assign pg_code = exp_page_size(active_vaddr_q);
+  assign exp_vpn_part = exp_vpn(active_vaddr_q, pg_code);
   assign lin1    = active_vaddr_q[31:28];
   assign lin0    = active_vaddr_q[27:24];
 
@@ -142,7 +146,7 @@ module ibex_super_ptw import ibex_pkg::*; (
     state_d          = state_q;
     servicing_itlb_d = servicing_itlb_q;
     active_vaddr_d   = active_vaddr_q;
-    l3_base_addr_d   = l3_base_addr_q;
+    exp_page_base_d   = exp_page_base_q;
 
     ptw_mem_req_o    = 1'b0;
     ptw_mem_addr_o   = '0;
@@ -169,14 +173,14 @@ module ibex_super_ptw import ibex_pkg::*; (
           ptw_error_o = 1'b1;
           state_d     = IDLE;
         end else begin
-          logic [31:0] l1_base;
-          logic [31:0] l2_addr;
+          logic [31:0] l0base;
+          logic [31:0] l0pte_addr;
 
-          l1_base = pte_base_addr(l1pte);
-          l2_addr = l1_base + {26'b0, lin0, 2'b00};
+          l0base = pte_base_addr_256(l1pte);
+          l0pte_addr = l0base + {24'b0, pg_code, lin0, 2'b00};
 
           ptw_mem_req_o  = 1'b1;
-          ptw_mem_addr_o = l2_addr;
+          ptw_mem_addr_o = l0pte_addr;
 
           if (ptw_mem_gnt_i) begin
             state_d = L2_WAIT;
@@ -186,25 +190,25 @@ module ibex_super_ptw import ibex_pkg::*; (
 
       L2_WAIT: begin
         if (ptw_mem_rvalid_i) begin
-          logic [31:0] l2pte;
-          l2pte = ptw_mem_rdata_i;
+          logic [31:0] l0pte;
+          l0pte = ptw_mem_rdata_i;
 
-          if (ptw_mem_err_i || pte_is_bad_pointer(l2pte)) begin
+          if (ptw_mem_err_i || pte_is_bad_pointer(l0pte)) begin
             ptw_error_o = 1'b1;
             state_d     = IDLE;
           end else begin
-            l3_base_addr_d = pte_base_addr(l2pte);
+            exp_page_base_d = pte_base_addr_64(l0pte);
             state_d        = L3_REQ;
           end
         end
       end
 
       L3_REQ: begin
-        logic [31:0] l3_addr;
-        l3_addr = l3_base_addr_q + {26'b0, exp_sel, 2'b00};
+        logic [31:0] leaf_pte_addr;
+        leaf_pte_addr = exp_page_base_q + {26'b0, exp_vpn_part, 2'b00};
 
         ptw_mem_req_o  = 1'b1;
-        ptw_mem_addr_o = l3_addr;
+        ptw_mem_addr_o = leaf_pte_addr;
 
         if (ptw_mem_gnt_i) begin
           state_d = L3_WAIT;
@@ -275,13 +279,25 @@ module ibex_super_ptw import ibex_pkg::*; (
       state_q          <= IDLE;
       servicing_itlb_q <= 1'b0;
       active_vaddr_q   <= '0;
-      l3_base_addr_q   <= '0;
+      exp_page_base_q   <= '0;
     end else begin
       state_q          <= state_d;
       servicing_itlb_q <= servicing_itlb_d;
       active_vaddr_q   <= active_vaddr_d;
-      l3_base_addr_q   <= l3_base_addr_d;
+      exp_page_base_q   <= exp_page_base_d;
     end
   end
+
+`ifndef SYNTHESIS
+  // synopsys translate_off
+  always_ff @(negedge clk_i) begin
+    if (rst_ni) begin
+      if (ptw_error_o) begin
+        $display("[PTW] %0t: ERROR state=%s va=0x%08h", $time, state_q.name(), active_vaddr_q);
+      end
+    end
+  end
+  // synopsys translate_on
+`endif
 
 endmodule

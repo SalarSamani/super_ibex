@@ -1538,7 +1538,7 @@ module ibex_core import ibex_pkg::*; #(
 
     // Data TLB (Super MMU)
     ibex_super_tlb #(
-      .TLB_ENTRIES(4)
+      .TLB_ENTRIES(64)
     ) dtlb_i (
       .clk_i            (clk_i),
       .rst_ni           (rst_ni),

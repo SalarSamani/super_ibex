@@ -16,6 +16,7 @@ filesets:
       - rtl/bus.sv
       - rtl/sim/simulator_ctrl.sv
       - rtl/timer.sv
+      - rtl/ibex_simple_system_disk.sv
     file_type: systemVerilogSource
 
 targets:

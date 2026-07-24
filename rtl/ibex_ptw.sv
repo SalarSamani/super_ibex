@@ -91,6 +91,8 @@ module ibex_ptw import ibex_pkg::*; (
       LVL1_REQ: begin
         ptw_mem_req_o  = 1'b1;
         // Level 1 Address Calculation: Base_PPN * 4096 + VPN[1] * 4
+        // Sv32 spec defines a 22-bit PPN (34-bit PA), but ptw_mem_addr_o is hard-wired
+        // 32-bit by the LSU bus, so PPN is truncated to 20 bits. Known deviation: PA limited to 4 GiB.
         ptw_mem_addr_o = {current_ppn_q[19:0], active_vaddr_q[31:22], 2'b00};
         
         if (ptw_mem_gnt_i) begin
@@ -138,6 +140,8 @@ module ibex_ptw import ibex_pkg::*; (
       LVL0_REQ: begin
         ptw_mem_req_o  = 1'b1;
         // Level 0 Address Calculation: Next_PPN * 4096 + VPN[0] * 4
+        // Sv32 spec defines a 22-bit PPN (34-bit PA), but ptw_mem_addr_o is hard-wired
+        // 32-bit by the LSU bus, so PPN is truncated to 20 bits. Known deviation: PA limited to 4 GiB.
         ptw_mem_addr_o = {current_ppn_q[19:0], active_vaddr_q[21:12], 2'b00};
         
         if (ptw_mem_gnt_i) begin

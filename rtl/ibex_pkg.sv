@@ -653,23 +653,23 @@ package ibex_pkg;
     CSR_CPUCTRLSTS     = 12'h7C0,
     CSR_SECURESEED     = 12'h7C1,
 
-    // Custom L1 PTE Registers
-    CSR_L1PTE0         = 12'h3C0,
-    CSR_L1PTE1         = 12'h3C1,
-    CSR_L1PTE2         = 12'h3C2,
-    CSR_L1PTE3         = 12'h3C3,
-    CSR_L1PTE4         = 12'h3C4,
-    CSR_L1PTE5         = 12'h3C5,
-    CSR_L1PTE6         = 12'h3C6,
-    CSR_L1PTE7         = 12'h3C7,
-    CSR_L1PTE8         = 12'h3C8,
-    CSR_L1PTE9         = 12'h3C9,
-    CSR_L1PTE10        = 12'h3CA,
-    CSR_L1PTE11        = 12'h3CB,
-    CSR_L1PTE12        = 12'h3CC,
-    CSR_L1PTE13        = 12'h3CD,
-    CSR_L1PTE14        = 12'h3CE,
-    CSR_L1PTE15        = 12'h3CF
+    // Custom L1 PTE Registers (S-mode custom, 0x5C0-0x5CF)
+    CSR_L1PTE0         = 12'h5C0,
+    CSR_L1PTE1         = 12'h5C1,
+    CSR_L1PTE2         = 12'h5C2,
+    CSR_L1PTE3         = 12'h5C3,
+    CSR_L1PTE4         = 12'h5C4,
+    CSR_L1PTE5         = 12'h5C5,
+    CSR_L1PTE6         = 12'h5C6,
+    CSR_L1PTE7         = 12'h5C7,
+    CSR_L1PTE8         = 12'h5C8,
+    CSR_L1PTE9         = 12'h5C9,
+    CSR_L1PTE10        = 12'h5CA,
+    CSR_L1PTE11        = 12'h5CB,
+    CSR_L1PTE12        = 12'h5CC,
+    CSR_L1PTE13        = 12'h5CD,
+    CSR_L1PTE14        = 12'h5CE,
+    CSR_L1PTE15        = 12'h5CF
   } csr_num_e;
 
   // TLB Entry Format (standard Sv32)

@@ -22,6 +22,13 @@
 int putchar(int c);
 
 /**
+ * Reads next character from simulator input file (stdin.txt).
+ *
+ * @returns Next character, or -1 on EOF
+ */
+int getchar(void);
+
+/**
  * Writes string to simulator out log.  Signature matches c stdlib function of
  * the same name.
  *

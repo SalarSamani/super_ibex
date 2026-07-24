@@ -141,8 +141,35 @@ module ibex_tlb import ibex_pkg::*; #(
     end
   end
 
+`ifndef SYNTHESIS
+  // synopsys translate_off
+  int sv32_tlb_trace_fd;
+
+  initial begin
+    sv32_tlb_trace_fd = $fopen("sv32_tlb_trace.log", "w");
+  end
+
+  final begin
+    $fclose(sv32_tlb_trace_fd);
+  end
+
+  /* verilator lint_off SYNCASYNCNET */
+  always_ff @(negedge clk_i) begin
+    if (rst_ni && req_i && mmu_enabled &&
+        vaddr_i >= 32'h80000000 && vaddr_i <= 32'h90000000) begin
+      $fdisplay(sv32_tlb_trace_fd, "%0t,%s,0x%08h,%s",
+                $time,
+                is_instruction_i ? "ITLB" : "DTLB",
+                vaddr_i,
+                match_found ? "HIT" : "MISS");
+    end
+  end
+  /* verilator lint_on SYNCASYNCNET */
+  // synopsys translate_on
+`endif
+
   // Output Generation
-  
+
   // A hit occurs if the MMU is disabled (passthrough) OR if the tag matches.
   assign hit_o        = req_i && (match_found || !mmu_enabled);
   

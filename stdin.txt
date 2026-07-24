@@ -1,0 +1,13 @@
+uname -a
+mount -t procfs /proc 2>/dev/null
+free
+mount
+ls /dev
+ls /
+ls /data
+ls /system/bin
+echo PATH=$PATH
+/system/bin/ptest
+cat /data/hello.txt
+/system/bin/hello inline-arg
+echo === all-parts-pass ===

@@ -78,10 +78,11 @@ module ibex_simple_system (
   typedef enum logic[1:0] {
     Ram,
     SimCtrl,
-    Timer
+    Timer,
+    Disk
   } bus_device_e;
 
-  localparam int NrDevices = 3;
+  localparam int NrDevices = 4;
   localparam int NrHosts = 1;
 
   // interrupts
@@ -120,6 +121,8 @@ module ibex_simple_system (
   assign cfg_device_addr_mask[SimCtrl] = ~32'h3FF; // 1 kB
   assign cfg_device_addr_base[Timer] = 32'h30000;
   assign cfg_device_addr_mask[Timer] = ~32'h3FF; // 1 kB
+  assign cfg_device_addr_base[Disk] = 32'h40000;
+  assign cfg_device_addr_mask[Disk] = ~32'h3FF; // 1 kB
 
   // Instruction fetch signals
   logic instr_req;
@@ -322,7 +325,8 @@ module ibex_simple_system (
     );
 
   simulator_ctrl #(
-    .LogName("ibex_simple_system.log")
+    .LogName   ("ibex_simple_system.log"),
+    .InputFile ("stdin.txt")
     ) u_simulator_ctrl (
       .clk_i     (clk_sys),
       .rst_ni    (rst_sys_n),
@@ -352,6 +356,23 @@ module ibex_simple_system (
       .timer_rdata_o  (device_rdata[Timer]),
       .timer_err_o    (device_err[Timer]),
       .timer_intr_o   (timer_irq)
+    );
+
+  ibex_simple_system_disk #(
+    .ImgName  ("disk.img"),
+    .RamBase  (32'h00100000),
+    .RamDepthW(1024*1024/4)
+    ) u_disk (
+      .clk_i    (clk_sys),
+      .rst_ni   (rst_sys_n),
+      .req_i    (device_req[Disk]),
+      .we_i     (device_we[Disk]),
+      .be_i     (device_be[Disk]),
+      .addr_i   (device_addr[Disk]),
+      .wdata_i  (device_wdata[Disk]),
+      .rvalid_o (device_rvalid[Disk]),
+      .rdata_o  (device_rdata[Disk]),
+      .err_o    ()                    // already tied off above
     );
 
   export "DPI-C" function mhpmcounter_num;

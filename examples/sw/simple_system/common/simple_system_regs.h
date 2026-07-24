@@ -6,8 +6,9 @@
 #define SIMPLE_SYSTEM_REGS_H__
 
 #define SIM_CTRL_BASE 0x20000
-#define SIM_CTRL_OUT 0x0
+#define SIM_CTRL_OUT  0x0
 #define SIM_CTRL_CTRL 0x8
+#define SIM_CTRL_IN   0x10
 
 #define TIMER_BASE 0x30000
 #define TIMER_MTIME 0x0

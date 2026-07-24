@@ -174,6 +174,43 @@ module ibex_super_tlb import ibex_pkg::*; #(
     end
   end
 
+`ifndef SYNTHESIS
+  // synopsys translate_off
+  int supersv32_tlb_trace_fd;
+
+  initial begin
+    supersv32_tlb_trace_fd = $fopen("supersv32_tlb_trace.log", "w");
+  end
+
+  final begin
+    $fclose(supersv32_tlb_trace_fd);
+  end
+
+  /* verilator lint_off SYNCASYNCNET */
+  always_ff @(negedge clk_i) begin
+    if (rst_ni && req_i && mmu_enabled &&
+        vaddr_i >= 32'h80000000 && vaddr_i <= 32'h90000000) begin
+      $fdisplay(supersv32_tlb_trace_fd, "%0t,%s,0x%08h,%s",
+                $time,
+                is_instruction_i ? "ITLB" : "DTLB",
+                vaddr_i,
+                match_found ? "HIT" : "MISS");
+    end
+  end
+  /* verilator lint_on SYNCASYNCNET */
+
+  always_ff @(negedge clk_i) begin
+    if (rst_ni) begin
+      if (req_i && mmu_enabled && page_fault_o) begin
+        $display("[STLB] %0t: FAULT va=0x%08h priv=%0d isI=%0b isS=%0b pg=%0d tag=0x%03h hit=%0b pp=0x%06h paddr=0x%08h perm=%0b",
+                 $time, vaddr_i, priv_lvl_i, is_instruction_i, is_store_i, cur_pg_code,
+                 cur_tag12, match_found, matched_entry.phys_page, paddr_o, perm_fault);
+      end
+    end
+  end
+  // synopsys translate_on
+`endif
+
   // Output
   assign hit_o        = req_i && (match_found || !mmu_enabled);
   assign page_fault_o = req_i && mmu_enabled && match_found && perm_fault;
